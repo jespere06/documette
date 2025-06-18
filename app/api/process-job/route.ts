@@ -9,7 +9,6 @@ export async function POST(req: NextRequest) {
 
   if (!jobId) {
     console.error("[process-job] Llamada recibida sin jobId. Abortando.");
-    // Devolvemos un 200 para que QStash no reintente un mensaje malformado.
     return NextResponse.json({ error: "jobId es requerido" }, { status: 200 });
   }
 
@@ -50,22 +49,16 @@ export async function POST(req: NextRequest) {
     if (!genRes.ok) throw new Error(`Fallo generando el acta: ${await genRes.text()}`);
     const { markdown, agreements } = await genRes.json();
     if (!markdown) throw new Error('La IA no pudo generar el contenido del acta.');
-    await supabase.from('processing_jobs').update({ markdown_result: markdown, agreements }).eq('id', jobId);
+    
+    // 🔥 CAMBIO CLAVE: Actualizamos todo al final, incluyendo el markdown y el estado 'complete'
+    // Se elimina el paso 4 (Generación de DOCX)
+    await supabase.from('processing_jobs').update({ 
+      markdown_result: markdown, 
+      agreements,
+      status: 'complete' // <-- Marcamos como completo aquí mismo
+    }).eq('id', jobId);
 
-    // 4. GENERACIÓN DEL DOCUMENTO DOCX
-    const docGenRes = await fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/generate-docx`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown, userId }), // Asumiendo que generate-docx necesita el userId
-    });
-    if (!docGenRes.ok) throw new Error(`Fallo generando el DOCX: ${await docGenRes.text()}`);
-    // Aquí asumimos que generate-docx devuelve una URL pública del DOCX guardado en algún storage.
-    // Si devuelve el blob, necesitarías guardarlo en GCS/Supabase Storage y obtener la URL.
-    // Por simplicidad, supongamos que devuelve una URL en el JSON.
-    const { docxUrl } = await docGenRes.json(); 
-    await supabase.from('processing_jobs').update({ result_doc_url: docxUrl }).eq('id', jobId);
-
-    // 5. BORRADO DEL AUDIO ORIGINAL
+    // 4. BORRADO DEL AUDIO ORIGINAL (se ejecuta en segundo plano)
     fetch(`${process.env.NEXT_PUBLIC_APP_URL}/api/delete-audio-gcs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -73,8 +66,7 @@ export async function POST(req: NextRequest) {
     }).catch(err => console.error(`[process-job] Fallo en el borrado en segundo plano del audio ${fileName}:`, err));
     
     // --- FINALIZACIÓN EXITOSA ---
-    await supabase.from('processing_jobs').update({ status: 'complete' }).eq('id', jobId);
-    console.log(`[process-job] Trabajo ${jobId} completado exitosamente.`);
+    console.log(`[process-job] Trabajo ${jobId} completado exitosamente (sin DOCX).`);
     
     return NextResponse.json({ status: "Job completed" });
 
@@ -86,7 +78,6 @@ export async function POST(req: NextRequest) {
         error_message: error.message 
     }).eq('id', jobId);
     
-    // Devolvemos un 200 para que QStash no reintente un trabajo que ya sabemos que ha fallado.
     return NextResponse.json({ error: error.message }, { status: 200 });
   }
 }

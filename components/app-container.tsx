@@ -10,10 +10,9 @@ import { Footer } from "@/components/footer"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Terminal, RotateCw } from "lucide-react"
 import type { User as SupabaseUser } from "@supabase/supabase-js"
-import type { ActaData, ProcessingStep, Speaker } from "@/app/page" // Mantengo tus tipos
+import type { ActaData, ProcessingStep, Speaker } from "@/app/page"
 import { Button } from "./ui/button"
 
-// Interfaz para la configuración, sin cambios
 interface TemplateData {
   gemini_api_key: string | null
   deepgram_api_key: string | null
@@ -26,12 +25,9 @@ interface AppContainerProps {
 }
 
 export function AppContainer({ user }: AppContainerProps) {
-  // --- ESTADOS REFACTORIZADOS ---
-  // Estado para la vista principal que controla qué componente principal se muestra
+  // --- ESTADOS ---
   const [currentView, setCurrentView] = useState<"upload" | "processing" | "complete" | "error">("upload");
-  // Estado para el paso específico dentro de la vista de "processing"
   const [processingStep, setProcessingStep] = useState<ProcessingStep>("uploading");
-  
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [actaData, setActaData] = useState<ActaData | null>(null);
   const [progress, setProgress] = useState(0);
@@ -39,14 +35,11 @@ export function AppContainer({ user }: AppContainerProps) {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   const [configError, setConfigError] = useState<string | null>(null);
   const [userPrompt, setUserPrompt] = useState<string | null>(null);
-
-  // Nuevos estados para el flujo asíncrono
   const [jobId, setJobId] = useState<string | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // --- LÓGICA EXISTENTE ---
+  // --- EFECTO PARA CARGAR CONFIGURACIÓN INICIAL ---
   useEffect(() => {
-    // Tu lógica `fetchTemplateConfig` permanece exactamente igual
     const fetchTemplateConfig = async () => {
       setIsLoadingConfig(true);
       setConfigError(null);
@@ -55,11 +48,13 @@ export function AppContainer({ user }: AppContainerProps) {
         const { data: userInfo, error: userError } = await supabase.from('user_info').select('template_id').eq('user_id', user.id).single();
         if (userError) throw new Error(`Error de base de datos al buscar su información [${userError.code}]: ${userError.message}.`);
         if (!userInfo || !userInfo.template_id) throw new Error("Su cuenta de usuario no tiene una plantilla de trabajo asignada. Por favor, contacte al administrador.");
+        
         const templateId = userInfo.template_id;
         const { data: template, error: templateError } = await supabase.from('templates').select('gemini_api_key, deepgram_api_key, speaker_context, default_prompt').eq('id', templateId).single();
         if (templateError) throw new Error(`Error de base de datos al buscar la plantilla [${templateError.code}]: ${templateError.message}.`);
         if (!template) throw new Error("La plantilla asignada a su cuenta no fue encontrada en la base de datos.");
         if (!template.gemini_api_key || !template.deepgram_api_key) throw new Error("La configuración de la plantilla está incompleta. Faltan claves de API.");
+        
         setTemplateData(template);
         setUserPrompt(template.default_prompt);
       } catch (error: any) {
@@ -72,7 +67,7 @@ export function AppContainer({ user }: AppContainerProps) {
     fetchTemplateConfig();
   }, [user.id]);
 
-  // --- NUEVA LÓGICA DE POLLING ---
+  // --- LÓGICA DE POLLING Y MANEJO DE PROGRESO ---
   const stopPolling = () => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -91,39 +86,48 @@ export function AppContainer({ user }: AppContainerProps) {
            throw new Error(errorData.error || `Fallo al verificar estado (HTTP ${res.status})`);
         }
         
-        // El tipo de `data` debe coincidir con lo que devuelve `/api/job-status`
         const data = await res.json();
-        
-        // Actualiza el paso de procesamiento para la UI
-        // Aseguramos que el status de la BD es un ProcessingStep válido
-        if (['transcribing', 'diarizing', 'generating'].includes(data.status)) {
-            setProcessingStep(data.status as ProcessingStep);
-        }
 
-        if (data.status === 'complete') {
-          stopPolling();
-          // Cuando el trabajo está completo, la BD debe tener los datos para `ActaData`
-          // Creamos el objeto `ActaData` a partir de los resultados del job
-          const blob = await fetch(data.result_doc_url).then(r => r.blob());
-          const docUrl = URL.createObjectURL(blob);
-
-          setActaData({
-            title: audioFile?.name.replace(/\.[^/.]+$/, "") || 'Acta generada',
-            date: new Date().toISOString().split("T")[0],
-            participants: (data.speakers as Speaker[] || []).map(s => s.name),
-            speakers: data.speakers || [],
-            summary: data.summary || '',
-            agreements: data.agreements || [],
-            transcript: data.diarized_transcript || '',
-            duration: 0, // Este dato se pierde, se podría calcular si es necesario
-            markdown: data.markdown_result || '',
-            docUrl,
-          });
-          setCurrentView('complete');
-        } else if (data.status === 'error') {
-          stopPolling();
-          setConfigError(data.error_message || "Ocurrió un error desconocido durante el proceso.");
-          setCurrentView('error');
+        // 🔥 CAMBIO CLAVE: Lógica de progreso por etapas basada en el estado del backend
+        switch (data.status) {
+          case 'submitted':
+          case 'transcribing':
+            setProcessingStep('transcribing');
+            setProgress(25);
+            break;
+          case 'diarizing':
+            setProcessingStep('diarizing');
+            setProgress(50);
+            break;
+          case 'generating':
+            setProcessingStep('generating');
+            setProgress(75);
+            break;
+          case 'complete':
+            stopPolling();
+            setProgress(100);
+            if (!data.markdown_result) {
+              throw new Error("El proceso se completó, pero no se encontró el contenido del acta.");
+            }
+            setActaData({
+              title: audioFile?.name.replace(/\.[^/.]+$/, "") || 'Acta generada',
+              date: new Date().toISOString().split("T")[0],
+              participants: (data.speakers as Speaker[] || []).map(s => s.name),
+              speakers: data.speakers || [],
+              summary: data.summary || '',
+              agreements: data.agreements || [],
+              transcript: data.diarized_transcript || '',
+              duration: 0, 
+              markdown: data.markdown_result,
+              docUrl: '', // No se necesita, se puede generar en ActaEditor
+            });
+            setCurrentView('complete');
+            break;
+          case 'error':
+            stopPolling();
+            setConfigError(data.error_message || "Ocurrió un error desconocido durante el proceso.");
+            setCurrentView('error');
+            break;
         }
       } catch (err: any) {
         stopPolling();
@@ -140,11 +144,11 @@ export function AppContainer({ user }: AppContainerProps) {
       }
     }
 
-    return () => stopPolling(); // Limpieza
+    return () => stopPolling();
   }, [currentView, jobId, audioFile]);
 
 
-  // --- FUNCIONES DE MANEJO REFACTORIZADAS ---
+  // --- MANEJADORES DE ACCIONES ---
   const handleFileUpload = (file: File) => {
     if (isLoadingConfig || configError || !templateData) {
         alert("Por favor, espere a que la configuración se cargue o solucione el error de configuración.");
@@ -155,7 +159,6 @@ export function AppContainer({ user }: AppContainerProps) {
   }
 
   const uploadToGCS = async (file: File, onProgress: (p: number) => void): Promise<{ publicUrl: string; fileName: string }> => {
-    // Tu función uploadToGCS permanece exactamente igual
     const res = await fetch('/api/generate-upload-url', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -205,15 +208,19 @@ export function AppContainer({ user }: AppContainerProps) {
     setProgress(0);
 
     try {
-      // 1. Subir a Google Cloud Storage, actualizando la barra de progreso
+      // La subida representará el primer 25% del progreso total
+      const UPLOAD_PROGRESS_MAX = 25;
+      
       console.log("Iniciando subida a Google Cloud Storage...");
-      const { publicUrl: audioUrl, fileName } = await uploadToGCS(file, (p) => setProgress(p));
+      const { publicUrl: audioUrl, fileName } = await uploadToGCS(file, (p) => {
+        // Escalar el progreso de la subida (0-100) al rango que le hemos asignado (0-25)
+        setProgress(Math.round(p * (UPLOAD_PROGRESS_MAX / 100)));
+      });
       if (!audioUrl || !fileName) { throw new Error("La subida se completó, pero no se recibió una URL o un nombre de archivo."); }
       
       console.log("Subida completada. Enviando trabajo al backend...");
-      setProcessingStep("transcribing"); // Cambiamos el texto a "Transcribiendo..."
+      setProcessingStep("transcribing"); // El siguiente paso es transcribir
 
-      // 2. Enviar el trabajo al backend para que lo ponga en la cola de QStash
       const res = await fetch('/api/submit-job', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -226,7 +233,7 @@ export function AppContainer({ user }: AppContainerProps) {
       }
 
       const { jobId: newJobId } = await res.json();
-      setJobId(newJobId); // <-- Esto activa el polling en el useEffect.
+      setJobId(newJobId); // Esto activa el polling que manejará el resto del progreso
 
     } catch (err: any) {
       console.error("Error en el proceso de envío:", err);
@@ -246,7 +253,7 @@ export function AppContainer({ user }: AppContainerProps) {
     setProcessingStep("uploading");
   }
 
-  // --- RENDERIZADO CONDICIONAL ---
+  // --- RENDERIZADO CONDICIONAL DE LA UI ---
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header user={user} />
