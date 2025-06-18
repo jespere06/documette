@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { Progress } from "@/components/ui/progress"
 import { Card } from "@/components/ui/card"
-import { Loader2, Headphones, Users, FileText, Zap } from "lucide-react"
+import { Loader2, Headphones, Users, FileText, Zap, UploadCloud } from "lucide-react" // [1] Importa un nuevo ícono
 import type { ProcessingStep } from "@/app/page"
 
 interface ProcessingViewProps {
@@ -20,10 +20,10 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
   useEffect(() => {
     const interval = setInterval(() => {
       setCurrentTime((prev) => prev + 1)
-      if (progress > 0) {
+      if (progress > 0 && currentTime > 0) { // Evita división por cero
         const timePerPercent = currentTime / progress
         const remainingPercent = 100 - progress
-        setEstimatedTime(Math.max(0, Math.round(timePerPercent * remainingPercent)))
+        setEstimatedTime(Math.round(timePerPercent * remainingPercent))
       }
     }, 1000)
 
@@ -31,6 +31,7 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
   }, [progress, currentTime])
 
   const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return "0.0 MB";
     const mb = bytes / (1024 * 1024)
     return `${mb.toFixed(1)} MB`
   }
@@ -41,6 +42,7 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
+  // [2] Mantenemos los 3 pasos principales en el array
   const steps = [
     {
       id: "transcribing",
@@ -62,11 +64,11 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
     },
   ]
 
+  // [3] El índice se calcula igual, pero lo usaremos con más inteligencia
   const currentStepIndex = steps.findIndex((s) => s.id === step)
 
   return (
     <div className="space-y-4">
-      {/* Header ultra compacto */}
       <div className="text-center space-y-2">
         <div className="inline-flex items-center space-x-2 bg-slate-900 text-white px-3 py-1 rounded-full text-xs">
           <Zap className="w-3 h-3" />
@@ -75,10 +77,8 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
         <h2 className="text-xl font-light text-slate-900">Generando acta profesional</h2>
       </div>
 
-      {/* Todo en una sola card compacta */}
       <Card className="p-4 bg-white border border-slate-200">
         <div className="space-y-4">
-          {/* Info del archivo + progreso en una fila */}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <div className="text-xs font-medium text-slate-500 uppercase tracking-wide">Archivo</div>
@@ -94,15 +94,19 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
             </div>
           </div>
 
-          {/* Barra de progreso */}
           <Progress value={progress} className="h-2 bg-slate-100" />
 
-          {/* Steps horizontales compactos */}
           <div className="grid grid-cols-3 gap-2">
             {steps.map((stepInfo, index) => {
-              const isActive = stepInfo.id === step
-              const isCompleted = index < currentStepIndex
-              const Icon = stepInfo.icon
+              // [4] Lógica de estado mejorada
+              const isUploadingStep = step === 'uploading' && index === 0;
+              const isActive = stepInfo.id === step || isUploadingStep;
+              const isCompleted = currentStepIndex > index;
+              
+              // [5] Lógica de contenido dinámico para el primer paso
+              const title = isUploadingStep ? "Subida" : stepInfo.title;
+              const description = isUploadingStep ? "Enviando archivo" : stepInfo.description;
+              const Icon = isUploadingStep ? UploadCloud : stepInfo.icon;
 
               return (
                 <div
@@ -125,8 +129,8 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
                         <Icon className="w-4 h-4 text-slate-400" />
                       )}
                     </div>
-                    <div className="text-xs font-medium">{stepInfo.title}</div>
-                    <div className="text-xs opacity-75">{stepInfo.description}</div>
+                    <div className="text-xs font-medium">{title}</div>
+                    <div className="text-xs opacity-75">{description}</div>
                   </div>
                 </div>
               )

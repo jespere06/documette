@@ -72,6 +72,35 @@ export function AppContainer({ user }: AppContainerProps) {
     handleProcess(file)
   }
 
+  const uploadToCloudinary = async (file: File): Promise<{ secure_url: string; public_id: string }> => {
+    const signRes = await fetch('/api/sign-cloudinary-upload', { method: 'POST' });
+    if (!signRes.ok) throw new Error("No se pudo obtener la firma para la subida del archivo.");
+    const { signature, timestamp } = await signRes.json();
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('api_key', process.env.NEXT_PUBLIC_CLOUDINARY_API_KEY!);
+    formData.append('timestamp', timestamp);
+    formData.append('signature', signature);
+    formData.append('folder', 'audios_actas');
+
+    const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
+    const uploadUrl = `https://api.cloudinary.com/v1_1/${cloudName}/video/upload`;
+    
+    const uploadRes = await fetch(uploadUrl, { method: 'POST', body: formData });
+    
+    if (!uploadRes.ok) {
+        const errorData = await uploadRes.json();
+        throw new Error(`Error al subir a Cloudinary: ${errorData.error.message}`);
+    }
+
+    const uploadData = await uploadRes.json();
+    return {
+      secure_url: uploadData.secure_url,
+      public_id: uploadData.public_id
+    };
+  }
+
   const handleProcess = async (file: File) => {
     if (!templateData?.deepgram_api_key || !templateData?.gemini_api_key) {
       setConfigError("Error: Configuración crítica faltante. El proceso no puede continuar.")
@@ -79,68 +108,72 @@ export function AppContainer({ user }: AppContainerProps) {
       return
     }
 
-    setCurrentStep("transcribing")
-    setProgress(10)
+    // Iniciar con el estado visual correcto: "uploading"
+    setCurrentStep("uploading"); 
+    setProgress(5);
+
+    let audioPublicId: string | null = null;
 
     try {
-      // Pasos 1 y 2 (sin cambios)
-      const formData = new FormData();
-      formData.append("audio", file);
-      formData.append("deepgram_api_key", templateData.deepgram_api_key);
-      const transRes = await fetch("/api/transcribe", { method: "POST", body: formData });
+      // 1. Subir a Cloudinary
+      console.log("Subiendo archivo a Cloudinary...");
+      const { secure_url: audioUrl, public_id } = await uploadToCloudinary(file);
+      audioPublicId = public_id;
+      console.log("Subida completada. URL:", audioUrl, "Public ID:", audioPublicId);
+      
+      // La subida terminó, ahora actualiza el estado a "transcribing" para el siguiente paso
+      setCurrentStep("transcribing");
+      setProgress(20);
+
+      // 2. Llamar a la API de transcripción
+      const transRes = await fetch("/api/transcribe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          audioUrl: audioUrl,
+          deepgram_api_key: templateData.deepgram_api_key,
+        }),
+      });
       if (!transRes.ok) throw new Error(`Error en la transcripción: ${await transRes.text()}`);
       const { text: transcript } = await transRes.json();
+      
       setProgress(35);
       setCurrentStep("diarizing");
 
+      // 3. Identificar hablantes
       const identifyRes = await fetch("/api/identify-speakers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transcript, context: templateData.speaker_context, gemini_api_key: templateData.gemini_api_key }) });
       if (!identifyRes.ok) throw new Error(`Error identificando hablantes: ${await identifyRes.text()}`);
       const { diarizedTranscript, speakers, summary } = await identifyRes.json();
+      
       setProgress(60);
       setCurrentStep("generating");
 
-      // 3️⃣ Generate acta markdown
+      // 4. Generar el acta
       const genRes = await fetch("/api/generate-acta", { 
         method: "POST", 
         headers: { "Content-Type": "application/json" }, 
-        body: JSON.stringify({ 
-            transcript: diarizedTranscript, 
-            speakers, 
-            gemini_api_key: templateData.gemini_api_key,
-            prompt: userPrompt
-        }) 
+        body: JSON.stringify({ transcript: diarizedTranscript, speakers, gemini_api_key: templateData.gemini_api_key, prompt: userPrompt }) 
       });
-      if (!genRes.ok) {
-        const errorText = await genRes.text();
-        throw new Error(`Error generando el acta: ${errorText}`);
-      }
+      if (!genRes.ok) throw new Error(`Error generando el acta: ${await genRes.text()}`);
       const { markdown, agreements } = await genRes.json();
+      
       setProgress(80);
 
-      // --- [CORRECCIÓN CLAVE] AÑADIMOS UN GUARDIA DE VALIDACIÓN ---
-      console.log("Respuesta de /api/generate-acta recibida. Verificando contenido...");
       if (!markdown || typeof markdown !== 'string' || markdown.trim() === '') {
-        // Este error es mucho más específico y útil.
-        throw new Error('La IA no pudo generar el contenido del acta (el resultado de markdown estaba vacío o era inválido). Por favor, intente de nuevo o con otro audio.');
+        throw new Error('La IA no pudo generar el contenido del acta. Por favor, intente de nuevo o con otro audio.');
       }
-      console.log("Verificación de Markdown superada. Procediendo a generar DOCX...");
 
-      // 4️⃣ Llamar a la API Route para generar el DOCX
+      // 5. Generar el documento DOCX
       const docGenRes = await fetch("/api/generate-docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ markdown, userId: user.id }),
       });
-
-      if (!docGenRes.ok) {
-        const errorData = await docGenRes.json();
-        throw new Error(`Error generando el documento DOCX: ${errorData.message || docGenRes.statusText}`);
-      }
-
+      if (!docGenRes.ok) throw new Error(`Error generando el documento DOCX: ${(await docGenRes.json()).message || docGenRes.statusText}`);
+      
       const docBlob = await docGenRes.blob();
       const docUrl = URL.createObjectURL(docBlob);
       
-      // 5️⃣ Set ActaData
       setActaData({ 
         title: file.name.replace(/\.[^/.]+$/, ""), 
         date: new Date().toISOString().split("T")[0], 
@@ -153,12 +186,22 @@ export function AppContainer({ user }: AppContainerProps) {
         markdown, 
         docUrl 
       });
+
+      // 6. Borrar el archivo de audio de Cloudinary
+      console.log("Proceso completado. Solicitando borrado del audio original de Cloudinary...");
+      fetch("/api/delete-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ publicId: audioPublicId }),
+      }).catch(err => {
+        console.error("La solicitud de borrado del audio falló:", err);
+      });
+
       setProgress(100);
       setCurrentStep("complete");
 
     } catch (err: any) {
       console.error("Error en el proceso:", err);
-      // Ahora el mensaje de error será más específico si falla la generación del acta.
       setConfigError(`Ocurrió un error durante el proceso: ${err.message}`);
       setCurrentStep("upload");
       setProgress(0);
@@ -189,7 +232,7 @@ export function AppContainer({ user }: AppContainerProps) {
           <AudioUpload onFileUpload={handleFileUpload} disabled={isLoadingConfig || !!configError} />
         )}
 
-        {(currentStep === "transcribing" || currentStep === "diarizing" || currentStep === "generating") && (
+        {(currentStep === "uploading" || currentStep === "transcribing" || currentStep === "diarizing" || currentStep === "generating") && (
           <ProcessingView step={currentStep} progress={progress} fileName={audioFile?.name || ""} fileSize={audioFile?.size || 0} />
         )}
 

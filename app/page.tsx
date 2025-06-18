@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server"
 import { redirect } from "next/navigation"
 import { AppContainer } from "@/components/app-container"
 
-export type ProcessingStep = "upload" | "transcribing" | "diarizing" | "generating" | "complete"
+export type ProcessingStep = "upload" | "uploading" | "transcribing" | "diarizing" | "generating" | "complete"
 
 export interface Speaker {
   id: string

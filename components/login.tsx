@@ -152,7 +152,7 @@ export function Login() {
 
         {/* Footer */}
         <div className="text-center text-xs text-slate-500 font-light">
-          © 2024 Documette. Procesamiento seguro y confidencial.
+          © 2025 Documette. Procesamiento seguro y confidencial.
         </div>
       </div>
     </div>
