@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     }
 
     // CAMBIO 1: Instanciación del SDK. (Se mantiene igual, pero es el primer paso)
-    const ai = new GoogleGenAI(gemini_api_key);
+    const ai = new GoogleGenAI({ apiKey: gemini_api_key });
 
     // CAMBIO 2: Creación de un objeto `config` centralizado.
     // Esto incluye `thinkingConfig` y mueve la configuración del modelo aquí.
