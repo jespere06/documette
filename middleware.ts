@@ -8,7 +8,8 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Todas las rutas salvo estáticos, imágenes y favicon
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // Excluir rutas estáticas, imágenes, favicon y rutas de API
+    '/((?!_next/static|_next/image|favicon.ico|api/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
-}
+};
+
