@@ -20,7 +20,6 @@ export async function POST(req: Request) {
 
     // Configuración para respuesta JSON
     const config = {
-      // thinkingConfig solo funciona en generateContentStream,
       thinkingConfig: {
         thinkingBudget: -1, 
       },

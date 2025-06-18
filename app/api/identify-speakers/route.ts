@@ -1,6 +1,9 @@
 // /app/api/identify-speakers/route.ts
+
 import { GoogleGenAI, Type, Content } from "@google/genai";
 import { NextResponse } from "next/server";
+
+export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   console.log("identify-speaker API route POST function started");
@@ -18,25 +21,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing 'transcript' in the request body." }, { status: 400 });
     }
 
-    // CAMBIO 1: Instanciación del SDK. (Se mantiene igual, pero es el primer paso)
+    // Instanciamos el SDK
     const ai = new GoogleGenAI({ apiKey: gemini_api_key });
 
-    // CAMBIO 2: Creación de un objeto `config` centralizado.
-    // Esto incluye `thinkingConfig` y mueve la configuración del modelo aquí.
+    // Configuración de generación y esquema JSON
     const config = {
-      // Habilitamos el pensamiento del modelo para un análisis más profundo.
-      thinkingConfig: {
-        thinkingBudget: -1, // Presupuesto de pensamiento "ilimitado".
-      },
-      // Parámetros de generación que antes estaban en `generationConfig`.
       temperature: 0.7,
       topP: 0.9,
       topK: 30,
       maxOutputTokens: 20192,
-      // Forzamos la salida a JSON con el esquema requerido.
       responseMimeType: "application/json",
       responseSchema: {
-        type: Type.OBJECT, // Usamos `Type` del nuevo import.
+        type: Type.OBJECT,
         properties: {
           summary: {
             type: Type.STRING,
@@ -60,11 +56,8 @@ export async function POST(req: Request) {
     };
 
     const contextInstruction = context
-      ? `
-Información de contexto adicional para mejorar la precisión (por ejemplo, nombres que no se mencionan explícitamente):
-${context}
-`
-      : '';
+      ? `\nInformación de contexto adicional para mejorar la precisión:\n${context}\n`
+      : "";
 
     const prompt = `
 Analiza la siguiente transcripción de una reunión y extrae la siguiente información:
@@ -73,7 +66,7 @@ Analiza la siguiente transcripción de una reunión y extrae la siguiente inform
 2.  **speaker**: Una lista con cada hablante identificado, extrayendo para cada uno:
     *   **speaker_number_to_replace**: El número entero que aparece en la etiqueta [Speaker:<número>].
     *   **name**: El nombre del hablante, inferido del texto. Si no se puede determinar, usa "Desconocido".
-    *   **role**: El rol o función del hablante (ej. "Secretaria de Despacho", "Concejal"). Si no se puede inferir, usa "Desconocido".
+    *   **role**: El rol o función del hablante. Si no se puede inferir, usa "Desconocido".
 ${contextInstruction}
 Transcripción:
 \`\`\`
@@ -82,91 +75,96 @@ ${transcript}
 
 Devuelve únicamente un objeto JSON que cumpla con la estructura especificada y sin ningún texto adicional.
 `;
-    // CAMBIO 3: Formatear el prompt en el objeto `Content[]` requerido por la API.
+
     const contents: Content[] = [
-        {
-            role: 'user',
-            parts: [{ text: prompt }]
-        }
+      {
+        role: "user",
+        parts: [{ text: prompt }]
+      }
     ];
 
-    // CAMBIO 4: Usar `generateContentStream` para activar `thinkingConfig`.
-    const responseStream = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
-        config,
-        contents,
+    // Llamada NO streaming
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      config,
+      contents,
     });
-    
-    // CAMBIO 5: Procesar el stream para obtener el JSON final, igual que en tu ejemplo anterior.
-    let finalJsonResponse: string | null = null;
-    for await (const chunk of responseStream) {
-        if (chunk.text) {
-            // El último chunk que no esté vacío contendrá el objeto JSON completo.
-            finalJsonResponse = chunk.text;
-        }
-    }
-    
-    if (!finalJsonResponse) {
-        return NextResponse.json({ error: "The AI did not produce any output." }, { status: 500 });
+
+    // Extraemos el JSON de la respuesta
+    const jsonString =
+      // SDK v1: texto plano
+      (response as any).text
+      // SDK v2 con choices
+      ?? (response as any).choices?.[0]?.message?.parts?.[0]?.text
+      ?? null;
+
+    if (!jsonString) {
+      return NextResponse.json(
+        { error: "No se recibió texto de la IA." },
+        { status: 500 }
+      );
     }
 
-    // --- El resto de tu lógica de negocio se mantiene, pero usando `finalJsonResponse` ---
-
-    let parsedData;
+    // Parseo del JSON
+    let parsedData: any;
     try {
-      parsedData = JSON.parse(finalJsonResponse);
-    } catch (error) {
-      console.error("Error parsing JSON response from Gemini:", error);
-      console.error("Raw response text:", finalJsonResponse);
+      parsedData = JSON.parse(jsonString);
+    } catch (err) {
+      console.error("Error parsing JSON:", jsonString);
       return NextResponse.json(
         {
-          error: "Failed to parse data from Gemini API response.",
-          rawResponse: finalJsonResponse,
+          error: "La IA no devolvió un JSON válido.",
+          raw: jsonString,
         },
-        { status: 500 },
+        { status: 500 }
       );
     }
 
-    if (!parsedData || !parsedData.summary || !parsedData.speaker) {
-      console.log("identify-speaker API route - Unexpected JSON format");
+    // Validación mínima
+    if (!parsedData.summary || !Array.isArray(parsedData.speaker)) {
       return NextResponse.json(
         {
-          error: "Unexpected JSON response format from Gemini API.",
-          rawResponse: finalJsonResponse,
+          error: "Formato de JSON inesperado.",
+          raw: parsedData,
         },
-        { status: 500 },
+        { status: 500 }
       );
     }
 
+    // Sustitución de etiquetas en la transcripción
     let diarizedTranscript = transcript;
-    
-    for (const speakerItem of parsedData.speaker) {
-      const speakerNumber = speakerItem.speaker_number_to_replace;
-      const speakerName = speakerItem.name || "Hablante Desconocido";
-      const speakerRole = speakerItem.role || "Rol Desconocido";
-      const replacementText = `\n\n**${speakerName}, ${speakerRole}:**`;
-      
+    for (const sp of parsedData.speaker) {
+      const num = sp.speaker_number_to_replace;
+      const name = sp.name || "Desconocido";
+      const role = sp.role || "Rol Desconocido";
+      const replacement = `\n\n**${name}, ${role}:**`;
       diarizedTranscript = diarizedTranscript.replaceAll(
-        `[Speaker:${speakerNumber}]`,
-        replacementText
+        `[Speaker:${num}]`,
+        replacement
       );
     }
-    
-    const summary = parsedData.summary;
+
+    // Preparamos la lista de participantes
     const speakersList = parsedData.speaker.map((sp: any) => ({
-        name: sp.name || "Desconocido",
-        role: sp.role || "Desconocido"
+      name: sp.name || "Desconocido",
+      role: sp.role || "Desconocido",
     }));
-    
+
     console.log("identify-speaker API route - Successful Response");
-    return NextResponse.json({
-        diarizedTranscript: diarizedTranscript,
-        summary: summary,
-        speakers: speakersList
-    }, { status: 200 });
+    return NextResponse.json(
+      {
+        diarizedTranscript,
+        summary: parsedData.summary,
+        speakers: speakersList,
+      },
+      { status: 200 }
+    );
 
   } catch (error: any) {
     console.error("Error in /api/identify-speakers:", error);
-    return NextResponse.json({ error: "Failed to process request", details: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to process request", details: error.message },
+      { status: 500 }
+    );
   }
 }
