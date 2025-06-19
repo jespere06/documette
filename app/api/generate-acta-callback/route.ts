@@ -1,7 +1,7 @@
 // ruta: app/api/generate-acta-callback/route.ts
 
 import { NextResponse, NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
         console.log(`[Callback Final] Contenido del acta recibido para: ${actaId}`);
 
         // 3. Actualizar la base de datos con los datos finales. Este es el paso crucial.
-        const supabase = await createClient();
+        const supabase = await createAdminClient();
         console.log(`[Callback Final] Actualizando acta ${actaId} en Supabase con status 'generated'. ¡PROCESO COMPLETADO!`);
         
         const { error: updateError } = await supabase
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
         try {
             const { actaId } = await req.clone().json(); // Clonamos por si el body ya fue leído.
             if (actaId) {
-                const supabase = await createClient();
+                const supabase = await createAdminClient();
                 await supabase
                     .from('actas')
                     .update({ status: 'error', summary: 'Fallo durante el callback final de generación.' })

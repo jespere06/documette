@@ -1,7 +1,7 @@
 // ruta: app/api/transcribe-callback/route.ts
 
 import { NextResponse, NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = "force-dynamic";
 
@@ -38,9 +38,29 @@ export async function POST(req: NextRequest) {
         const words = deepgramPayload.results?.channels?.[0]?.alternatives?.[0]?.words;
 
         if (words && Array.isArray(words)) {
-            // ... (tu lógica de formateo, que ya sabemos que funciona bien) ...
-            let currentSpeaker = null, currentUtteranceBlock = "";
-            for (const wordInfo of words) { const speaker = wordInfo.speaker; if (speaker === undefined) { currentUtteranceBlock += wordInfo.word + " "; continue; } if (currentSpeaker === null) { currentSpeaker = speaker; } if (speaker !== currentSpeaker) { if (currentUtteranceBlock.trim() !== "") { formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}\n`; } currentSpeaker = speaker; currentUtteranceBlock = ""; } currentUtteranceBlock += wordInfo.word + " "; } if (currentUtteranceBlock.trim() !== "" && currentSpeaker !== null) { formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}`; }
+            let currentSpeaker: number | null = null;
+            let currentUtteranceBlock = "";
+            for (const wordInfo of words) {
+                const speaker = wordInfo.speaker;
+                if (speaker === undefined) {
+                    currentUtteranceBlock += wordInfo.word + " ";
+                    continue;
+                }
+                if (currentSpeaker === null) {
+                    currentSpeaker = speaker;
+                }
+                if (speaker !== currentSpeaker) {
+                    if (currentUtteranceBlock.trim() !== "") {
+                        formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}\n`;
+                    }
+                    currentSpeaker = speaker;
+                    currentUtteranceBlock = "";
+                }
+                currentUtteranceBlock += wordInfo.word + " ";
+            }
+            if (currentUtteranceBlock.trim() !== "" && currentSpeaker !== null) {
+                formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}`;
+            }
         } else {
             formattedTranscription = deepgramPayload.results?.channels?.[0]?.alternatives?.[0]?.transcript || "Transcripción no disponible.";
         }
@@ -54,7 +74,7 @@ export async function POST(req: NextRequest) {
         // ==========================================================
         // 4. Actualizar la base de datos de Supabase (PUNTO CRÍTICO 1)
         // ==========================================================
-        const supabase = await createClient();
+        const supabase = await createAdminClient();
         console.log(`[CALLBACK_PASO_4_INICIO] Intentando actualizar acta ${actaId} en Supabase...`);
         
         const { data: updateData, error: updateError } = await supabase
@@ -131,7 +151,7 @@ export async function POST(req: NextRequest) {
             const payloadForError = await req.clone().json();
             const actaIdForError = payloadForError.metadata?.tags?.[0];
             if (actaIdForError) {
-                const supabase = await createClient();
+                const supabase = await createAdminClient();
                 await supabase.from('actas').update({ status: 'error', summary: `Fallo en callback: ${error.message}` }).eq('id', actaIdForError);
             }
         } catch (e) {

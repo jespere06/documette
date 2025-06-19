@@ -1,7 +1,7 @@
 // ruta: app/api/identify-speakers-callback/route.ts
 
 import { NextResponse, NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
         console.log(`[Callback Intermedio] Datos de diarización recibidos para el acta: ${actaId}`);
 
         // 3. Actualizar la base de datos con los datos recibidos.
-        const supabase = await createClient();
+        const supabase = await createAdminClient();
         console.log(`[Callback Intermedio] Actualizando acta ${actaId} en Supabase con status 'diarized'.`);
         
         const { error: updateError } = await supabase
@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
         try {
             const { actaId } = await req.clone().json();
             if (actaId) {
-                const supabase = await createClient();
+                const supabase = await createAdminClient();
                 await supabase
                     .from('actas')
                     .update({ status: 'error', summary: 'Fallo durante el callback de diarización.' })
