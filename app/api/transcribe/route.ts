@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     }
 
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.NEXT_PUBLIC_VERCEL_URL ? `https://${process.env.NEXT_PUBLIC_VERCEL_URL}` : 'http://localhost:3000');
-        const callbackUrl = new URL('/api/transcribe-callback', appUrl);
+    const callbackUrl = new URL('/api/transcribe-callback', appUrl);
     
     if (!process.env.CALLBACK_SECRET) {
         console.error("CRITICAL: La variable de entorno CALLBACK_SECRET no está configurada.");
