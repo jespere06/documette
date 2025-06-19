@@ -9,8 +9,24 @@ import { Header } from "@/components/header"
 import { Footer } from "@/components/footer"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Terminal } from "lucide-react"
-import type { User as SupabaseUser } from "@supabase/supabase-js"
+import type { RealtimeChannel, User as SupabaseUser } from "@supabase/supabase-js"
 import type { ActaData, ProcessingStep, Speaker } from "@/app/page"
+
+// Tipo para la fila de nuestra tabla 'actas'
+type ActaRow = {
+  id: string
+  status: 'uploaded' | 'transcribing' | 'transcribed' | 'diarizing' | 'diarized' | 'generating' | 'generated' | 'complete' | 'error'
+  file_name: string | null
+  gcs_path: string | null
+  transcript: string | null
+  diarized_transcript: string | null
+  speakers: Speaker[] | null
+  summary: string | null
+  markdown: string | null
+  agreements: string[] | null
+  created_at: string
+  updated_at: string
+}
 
 interface TemplateData {
   gemini_api_key: string | null
@@ -32,7 +48,9 @@ export function AppContainer({ user }: AppContainerProps) {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [configError, setConfigError] = useState<string | null>(null)
   const [userPrompt, setUserPrompt] = useState<string | null>(null);
+  const [currentActaId, setCurrentActaId] = useState<string | null>(null);
 
+  // useEffect para cargar la configuración (no cambia)
   useEffect(() => {
     const fetchTemplateConfig = async () => {
       setIsLoadingConfig(true);
@@ -43,9 +61,7 @@ export function AppContainer({ user }: AppContainerProps) {
         if (userError) throw new Error(`Error de base de datos al buscar su información [${userError.code}]: ${userError.message}.`);
         if (!userInfo || !userInfo.template_id) throw new Error("Su cuenta de usuario no tiene una plantilla de trabajo asignada. Por favor, contacte al administrador.");
         
-        const templateId = userInfo.template_id;
-        
-        const { data: template, error: templateError } = await supabase.from('templates').select('gemini_api_key, deepgram_api_key, speaker_context, default_prompt').eq('id', templateId).single();
+        const { data: template, error: templateError } = await supabase.from('templates').select('gemini_api_key, deepgram_api_key, speaker_context, default_prompt').eq('id', userInfo.template_id).single();
         if (templateError) throw new Error(`Error de base de datos al buscar la plantilla [${templateError.code}]: ${templateError.message}.`);
         if (!template) throw new Error("La plantilla asignada a su cuenta no fue encontrada en la base de datos.");
         if (!template.gemini_api_key || !template.deepgram_api_key) throw new Error("La configuración de la plantilla está incompleta. Faltan claves de API.");
@@ -62,162 +78,188 @@ export function AppContainer({ user }: AppContainerProps) {
     fetchTemplateConfig();
   }, [user.id]);
 
+  // useEffect para monitorear con Supabase Realtime (no cambia)
+  useEffect(() => {
+    if (!currentActaId) return;
+    const supabase = createClient();
+    const channel: RealtimeChannel = supabase
+      .channel(`actas-follow-up:${currentActaId}`)
+      .on<ActaRow>(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'actas', filter: `id=eq.${currentActaId}` },
+        (payload) => {
+          const newActa = payload.new;
+          console.log('[Realtime] Acta actualizada recibida:', newActa);
+          switch (newActa.status) {
+            case 'transcribed':
+              setCurrentStep('diarizing');
+              setProgress(35);
+              break;
+            case 'diarized':
+              setCurrentStep('generating');
+              setProgress(60);
+              break;
+            case 'generated':
+              setProgress(80);
+              handleProcessFinished(newActa);
+              break;
+            case 'error':
+              setConfigError(newActa.summary || "Ocurrió un error en el servidor.");
+              setCurrentStep("upload");
+              setProgress(0);
+              channel.unsubscribe();
+              break;
+          }
+        }
+      )
+      .subscribe((status, err) => {
+        if (err) {
+          console.error("[Realtime] Error en la subscripción:", err);
+          setConfigError("No se pudo conectar al servicio de monitoreo.");
+        }
+      });
+    return () => { supabase.removeChannel(channel); };
+  }, [currentActaId]);
+
   const handleFileUpload = (file: File) => {
     if (isLoadingConfig || configError || !templateData) {
         alert("Por favor, espere a que la configuración se cargue o solucione el error de configuración.")
         return;
     }
     setAudioFile(file)
-    handleProcess(file)
+    handleProcessStart(file) // <--- Llamamos a la función correcta
   }
 
-// En AppContainer.tsx
-
-const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }> => {
-  // ANTES:
-  // const getSignedUrlRes = await fetch('/api/sign-gcs-upload', {
+  // Lógica para subir a GCS (no cambia)
+  const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }> => {
+    const getSignedUrlRes = await fetch('/api/generate-upload-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: file.name, contentType: file.type })
+    });
+    if (!getSignedUrlRes.ok) throw new Error('No se pudo obtener una URL firmada para subir el archivo.');
+    const { signedUrl, publicUrl, fileName: gcsPath } = await getSignedUrlRes.json();
+    const uploadRes = await fetch(signedUrl, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
+    if (!uploadRes.ok) throw new Error('Error al subir el archivo a Google Cloud Storage.');
+    return { url: publicUrl, gcsPath };
+  };
   
-  // AHORA (CORREGIDO):
-  const getSignedUrlRes = await fetch('/api/generate-upload-url', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fileName: file.name, contentType: file.type })
-  });
-
-  if (!getSignedUrlRes.ok) {
-    throw new Error('No se pudo obtener una URL firmada para subir el archivo.');
-  }
-
-  // [IMPORTANTE] Asegurémonos de que la desestructuración coincida
-  // con lo que devuelve tu API /generate-upload-url
-  // Tu API devuelve: { signedUrl, publicUrl, fileName }
-  // Necesitamos adaptar la lógica para usar `fileName` como el `gcsPath`.
-  const { signedUrl, publicUrl, fileName: gcsPath } = await getSignedUrlRes.json();
-
-  const uploadRes = await fetch(signedUrl, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': file.type,
-    },
-    body: file
-  });
-
-  if (!uploadRes.ok) {
-    const errorText = await uploadRes.text();
-    console.error("Error al subir a GCS:", errorText);
-    throw new Error('Error al subir el archivo a Google Cloud Storage.');
-  }
-
-  return { url: publicUrl, gcsPath }; // gcsPath ahora es el uniqueFileName
-};
-  
-  const handleProcess = async (file: File) => {
-    if (!templateData?.deepgram_api_key || !templateData?.gemini_api_key) {
-      setConfigError("Error: Configuración crítica faltante. El proceso no puede continuar.")
-      setCurrentStep("upload")
-      return
+  // ====================================================================
+  // ESTA ES LA FUNCIÓN CLAVE CORREGIDA
+  // ====================================================================
+  const handleProcessStart = async (file: File) => {
+    if (!templateData?.deepgram_api_key) {
+      setConfigError("Error: Falta la clave de API de Deepgram.");
+      return;
     }
 
-    // Iniciar con el estado visual correcto: "uploading"
-    setCurrentStep("uploading"); 
+    setCurrentStep("uploading");
     setProgress(5);
 
-    let audioPublicId: string | null = null;
-
     try {
-      // 1. Subir a Cloudinary
-      console.log("Subiendo archivo a Cloudinary...");
+      const supabase = createClient();
+      
+      // 1. Crear el registro en Supabase para obtener un ID.
+      console.log("Paso 1: Creando registro inicial en Supabase...");
+      const { data: newActa, error: createError } = await supabase
+        .from('actas')
+        .insert({ user_id: user.id, file_name: file.name, status: 'uploaded' })
+        .select('id')
+        .single();
+      if (createError) throw new Error(`Error creando el acta en la base de datos: ${createError.message}`);
+      
+      setCurrentActaId(newActa.id);
+      
+      // 2. Subir el archivo a GCS.
+      console.log("Paso 2: Subiendo archivo a GCS...");
       const { url: audioUrl, gcsPath } = await uploadToGCS(file);
-      audioPublicId = gcsPath;
       
-      console.log("Subida completada. URL:", audioUrl, "Public ID:", audioPublicId);
-      
-      // La subida terminó, ahora actualiza el estado a "transcribing" para el siguiente paso
-      setCurrentStep("transcribing");
-      setProgress(20);
+      // 3. Actualizar el registro del acta con la ruta.
+      console.log("Paso 3: Actualizando el acta con la ruta del archivo...");
+      await supabase.from('actas').update({ gcs_path: gcsPath }).eq('id', newActa.id);
 
-      // 2. Llamar a la API de transcripción
+      setProgress(20);
+      setCurrentStep("transcribing");
+      
+      // 4. Llamar a la API para *iniciar* la transcripción.
+      console.log("Paso 4: Invocando a /api/transcribe...");
       const transRes = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audioUrl: audioUrl,
+          actaId: newActa.id, // <<-- La variable newActa SÍ existe en este contexto
           deepgram_api_key: templateData.deepgram_api_key,
         }),
       });
-      if (!transRes.ok) throw new Error(`Error en la transcripción: ${await transRes.text()}`);
-      const { text: transcript } = await transRes.json();
-      
-      setProgress(35);
-      setCurrentStep("diarizing");
 
-      // 3. Identificar hablantes
-      const identifyRes = await fetch("/api/identify-speakers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transcript, context: templateData.speaker_context, gemini_api_key: templateData.gemini_api_key }) });
-      if (!identifyRes.ok) throw new Error(`Error identificando hablantes: ${await identifyRes.text()}`);
-      const { diarizedTranscript, speakers, summary } = await identifyRes.json();
-      
-      setProgress(60);
-      setCurrentStep("generating");
-
-      // 4. Generar el acta
-      const genRes = await fetch("/api/generate-acta", { 
-        method: "POST", 
-        headers: { "Content-Type": "application/json" }, 
-        body: JSON.stringify({ transcript: diarizedTranscript, speakers, gemini_api_key: templateData.gemini_api_key, prompt: userPrompt }) 
-      });
-      if (!genRes.ok) throw new Error(`Error generando el acta: ${await genRes.text()}`);
-      const { markdown, agreements } = await genRes.json();
-      
-      setProgress(80);
-
-      if (!markdown || typeof markdown !== 'string' || markdown.trim() === '') {
-        throw new Error('La IA no pudo generar el contenido del acta. Por favor, intente de nuevo o con otro audio.');
+      if (!transRes.ok) {
+        const errorBody = await transRes.json();
+        throw new Error(`Error iniciando la transcripción: ${errorBody.error}`);
       }
-
-      // 5. Generar el documento DOCX
-      const docGenRes = await fetch("/api/generate-docx", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ markdown, userId: user.id }),
-      });
-      if (!docGenRes.ok) throw new Error(`Error generando el documento DOCX: ${(await docGenRes.json()).message || docGenRes.statusText}`);
       
-      const docBlob = await docGenRes.blob();
-      const docUrl = URL.createObjectURL(docBlob);
-      
-      setActaData({ 
-        title: file.name.replace(/\.[^/.]+$/, ""), 
-        date: new Date().toISOString().split("T")[0], 
-        participants: speakers.map((s: Speaker) => s.name), 
-        speakers, 
-        summary: summary || "", 
-        agreements: agreements || [], 
-        transcript: diarizedTranscript, 
-        duration: 0, 
-        markdown, 
-        docUrl 
-      });
-
-      // 6. Borrar el archivo de audio de Cloudinary
-      console.log("Proceso completado. Solicitando borrado del audio original de Cloudinary...");
-      fetch("/api/delete-audio", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ publicId: audioPublicId }),
-      }).catch(err => {
-        console.error("La solicitud de borrado del audio falló:", err);
-      });
-
-      setProgress(100);
-      setCurrentStep("complete");
+      console.log("¡Proceso iniciado! Esperando actualizaciones via Realtime.");
 
     } catch (err: any) {
-      console.error("Error en el proceso:", err);
-      setConfigError(`Ocurrió un error durante el proceso: ${err.message}`);
+      console.error("Error en la fase de inicio del proceso:", err);
+      setConfigError(`Ocurrió un error al iniciar: ${err.message}`);
       setCurrentStep("upload");
       setProgress(0);
+      if (currentActaId) setCurrentActaId(null);
     }
-  }
+  };
+  
+  // ====================================================================
+  // ESTA ES LA OTRA FUNCIÓN CLAVE NUEVA
+  // ====================================================================
+  const handleProcessFinished = async (finalActaData: ActaRow) => {
+    try {
+        if (!finalActaData.markdown) throw new Error("El acta se generó pero el contenido está vacío.");
+
+        console.log("Paso Final: Generando documento DOCX...");
+        const docGenRes = await fetch("/api/generate-docx", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ markdown: finalActaData.markdown, userId: user.id }),
+        });
+        if (!docGenRes.ok) throw new Error(`Error generando el DOCX: ${(await docGenRes.json()).message}`);
+        
+        const docBlob = await docGenRes.blob();
+        const docUrl = URL.createObjectURL(docBlob);
+        
+        setActaData({ 
+            title: finalActaData.file_name?.replace(/\.[^/.]+$/, "") || "Acta", 
+            date: new Date(finalActaData.created_at).toISOString().split("T")[0],
+            participants: finalActaData.speakers?.map((s) => s.name) || [], 
+            speakers: finalActaData.speakers || [],
+            summary: finalActaData.summary || "", 
+            agreements: finalActaData.agreements || [], 
+            transcript: finalActaData.diarized_transcript || "", 
+            duration: 0,
+            markdown: finalActaData.markdown, 
+            docUrl 
+        });
+
+        if (finalActaData.gcs_path) {
+            fetch("/api/delete-audio", { // Asumimos que esta API se adapta para GCS
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ publicId: finalActaData.gcs_path }),
+            }).catch(err => console.error("La solicitud de borrado del audio falló:", err));
+        }
+
+        setProgress(100);
+        setCurrentStep("complete");
+
+    } catch(err: any) {
+        console.error("Error en la fase final del cliente:", err);
+        setConfigError(`Ocurrió un error al finalizar el proceso: ${err.message}`);
+        setCurrentStep("upload");
+        setProgress(0);
+    } finally {
+        if (currentActaId) setCurrentActaId(null);
+    }
+  };
 
   const resetProcess = () => {
     setCurrentStep("upload");
@@ -225,8 +267,10 @@ const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }
     setActaData(null);
     setProgress(0);
     setConfigError(null);
-  }
+    if (currentActaId) setCurrentActaId(null);
+  };
 
+  // El return con el JSX no cambia
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Header user={user} />
