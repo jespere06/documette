@@ -291,8 +291,16 @@ export function AppContainer({ user }: AppContainerProps) {
           <ProcessingView step={currentStep} progress={progress} fileName={audioFile?.name || ""} fileSize={audioFile?.size || 0} />
         )}
 
+    
         {currentStep === "complete" && actaData && (
-          <ActaEditor actaData={actaData} onReset={resetProcess} onUpdate={setActaData} />
+          // ===============================================
+          // [NUEVO] CÓDIGO AÑADIDO PARA DEPURACIÓN
+          // ===============================================
+          <>
+            {console.log("DEBUG: Datos finales para ActaEditor:", actaData)}
+            <ActaEditor actaData={actaData} onReset={resetProcess} onUpdate={setActaData} />
+          </>
+          // ===============================================
         )}
       </main>
       <Footer />
