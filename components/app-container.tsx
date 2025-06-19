@@ -88,7 +88,6 @@ export function AppContainer({ user }: AppContainerProps) {
         
         const data = await res.json();
 
-        // 🔥 CAMBIO CLAVE: Lógica de progreso por etapas basada en el estado del backend
         switch (data.status) {
           case 'submitted':
           case 'transcribing':
@@ -105,10 +104,27 @@ export function AppContainer({ user }: AppContainerProps) {
             break;
           case 'complete':
             stopPolling();
-            setProgress(100);
+            setProgress(90); // Progreso al 90% mientras se genera el DOCX
+            
             if (!data.markdown_result) {
               throw new Error("El proceso se completó, pero no se encontró el contenido del acta.");
             }
+
+            console.log("Job completo. Generando DOCX desde el cliente...");
+            const docGenRes = await fetch("/api/generate-docx", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ markdown: data.markdown_result, userId: user.id }),
+            });
+
+            if (!docGenRes.ok) {
+              const errorData = await docGenRes.json();
+              throw new Error(`Error generando el documento DOCX: ${errorData.message || docGenRes.statusText}`);
+            }
+
+            const docBlob = await docGenRes.blob();
+            const docUrl = URL.createObjectURL(docBlob); // Crear la URL que ActaEditor espera
+
             setActaData({
               title: audioFile?.name.replace(/\.[^/.]+$/, "") || 'Acta generada',
               date: new Date().toISOString().split("T")[0],
@@ -119,8 +135,10 @@ export function AppContainer({ user }: AppContainerProps) {
               transcript: data.diarized_transcript || '',
               duration: 0, 
               markdown: data.markdown_result,
-              docUrl: '', // No se necesita, se puede generar en ActaEditor
+              docUrl: docUrl, // Se pasa la URL del blob para que ActaEditor funcione
             });
+
+            setProgress(100);
             setCurrentView('complete');
             break;
           case 'error':
@@ -131,21 +149,21 @@ export function AppContainer({ user }: AppContainerProps) {
         }
       } catch (err: any) {
         stopPolling();
-        console.error("Error durante el polling:", err);
-        setConfigError(`Error de conexión al verificar el estado: ${err.message}`);
+        console.error("Error durante el polling o la generación del DOCX:", err);
+        setConfigError(`Error finalizando el proceso: ${err.message}`);
         setCurrentView('error');
       }
     };
 
     if (currentView === 'processing' && jobId) {
       if (!pollingIntervalRef.current) {
-        pollStatus(); // Llama una vez inmediatamente
-        pollingIntervalRef.current = setInterval(pollStatus, 4000); // Luego cada 4 segundos
+        pollStatus();
+        pollingIntervalRef.current = setInterval(pollStatus, 4000);
       }
     }
 
     return () => stopPolling();
-  }, [currentView, jobId, audioFile]);
+  }, [currentView, jobId, audioFile, user.id]);
 
 
   // --- MANEJADORES DE ACCIONES ---
@@ -208,18 +226,16 @@ export function AppContainer({ user }: AppContainerProps) {
     setProgress(0);
 
     try {
-      // La subida representará el primer 25% del progreso total
       const UPLOAD_PROGRESS_MAX = 25;
       
       console.log("Iniciando subida a Google Cloud Storage...");
       const { publicUrl: audioUrl, fileName } = await uploadToGCS(file, (p) => {
-        // Escalar el progreso de la subida (0-100) al rango que le hemos asignado (0-25)
         setProgress(Math.round(p * (UPLOAD_PROGRESS_MAX / 100)));
       });
       if (!audioUrl || !fileName) { throw new Error("La subida se completó, pero no se recibió una URL o un nombre de archivo."); }
       
       console.log("Subida completada. Enviando trabajo al backend...");
-      setProcessingStep("transcribing"); // El siguiente paso es transcribir
+      setProcessingStep("transcribing");
 
       const res = await fetch('/api/submit-job', {
         method: 'POST',
@@ -233,7 +249,7 @@ export function AppContainer({ user }: AppContainerProps) {
       }
 
       const { jobId: newJobId } = await res.json();
-      setJobId(newJobId); // Esto activa el polling que manejará el resto del progreso
+      setJobId(newJobId);
 
     } catch (err: any) {
       console.error("Error en el proceso de envío:", err);

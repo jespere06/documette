@@ -1,15 +1,14 @@
 // src/app/api/job-status/route.ts
 
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server'; // Usamos el cliente SSR que respeta RLS
+import { createClient } from '@/lib/supabase/server';
 
 export async function GET(req: Request) {
-  // Nota: createClient() aquí usa el que definiste para SSR con cookies
   const supabase = await createClient(); 
 
   const { data: { user } } = await supabase.auth.getUser();
 
-  // 1. Proteger el endpoint: si no hay usuario, no hay acceso
+  // 1. Proteger el endpoint
   if (!user) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
   }
@@ -22,26 +21,30 @@ export async function GET(req: Request) {
   }
 
   try {
-    // 2. Consultar el trabajo. RLS se encarga de la seguridad.
-    // La política que creamos ("Los usuarios pueden ver sus propios trabajos")
-    // filtrará automáticamente para que solo devuelva un resultado si auth.uid() === user_id.
+    // 2. Consultar el trabajo con TODOS los campos necesarios para el frontend
     const { data: job, error } = await supabase
       .from('processing_jobs')
-      .select('status, error_message, result_doc_url, markdown_result')
+      .select(`
+        status,
+        error_message,
+        markdown_result,
+        speakers,
+        summary,
+        agreements,
+        diarized_transcript
+      `)
       .eq('id', jobId)
-      .single(); // .single() dará error si no encuentra una fila (o más de una)
+      .single();
 
     if (error) {
       console.warn(`[job-status] Fallo la consulta para el job ${jobId} del usuario ${user.id}:`, error.message);
-      // 'PGRST116' es el código de Supabase/PostgREST para "no se encontró la fila"
       if (error.code === 'PGRST116') {
         return NextResponse.json({ error: 'Trabajo no encontrado o no tienes permiso para verlo.' }, { status: 404 });
       }
-      // Para otros errores de base de datos
       throw error;
     }
 
-    // 3. Devolver los datos del trabajo
+    // 3. Devolver el objeto completo con todos los datos
     return NextResponse.json(job);
 
   } catch (error) {
