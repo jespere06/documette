@@ -52,7 +52,6 @@ export function AppContainer({ user }: AppContainerProps) {
         
         setTemplateData(template);
         setUserPrompt(template.default_prompt);
-
       } catch (error: any) {
         console.error("Error final al cargar la configuración:", error.message);
         setConfigError(error.message);
