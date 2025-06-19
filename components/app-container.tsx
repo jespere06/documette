@@ -12,7 +12,6 @@ import { Terminal } from "lucide-react"
 import type { RealtimeChannel, User as SupabaseUser } from "@supabase/supabase-js"
 import type { ActaData, ProcessingStep, Speaker } from "@/app/page"
 
-// Tipo para la fila de nuestra tabla 'actas'
 type ActaRow = {
   id: string
   status: 'uploaded' | 'transcribing' | 'transcribed' | 'diarizing' | 'diarized' | 'generating' | 'generated' | 'complete' | 'error'
@@ -50,7 +49,6 @@ export function AppContainer({ user }: AppContainerProps) {
   const [userPrompt, setUserPrompt] = useState<string | null>(null);
   const [currentActaId, setCurrentActaId] = useState<string | null>(null);
 
-  // useEffect para cargar la configuración (no cambia)
   useEffect(() => {
     const fetchTemplateConfig = async () => {
       setIsLoadingConfig(true);
@@ -78,7 +76,6 @@ export function AppContainer({ user }: AppContainerProps) {
     fetchTemplateConfig();
   }, [user.id]);
 
-  // useEffect para monitorear con Supabase Realtime (no cambia)
   useEffect(() => {
     if (!currentActaId) return;
     const supabase = createClient();
@@ -127,10 +124,9 @@ export function AppContainer({ user }: AppContainerProps) {
         return;
     }
     setAudioFile(file)
-    handleProcessStart(file) // <--- Llamamos a la función correcta
+    handleProcessStart(file)
   }
 
-  // Lógica para subir a GCS (no cambia)
   const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }> => {
     const getSignedUrlRes = await fetch('/api/generate-upload-url', {
       method: 'POST',
@@ -144,9 +140,6 @@ export function AppContainer({ user }: AppContainerProps) {
     return { url: publicUrl, gcsPath };
   };
   
-  // ====================================================================
-  // ESTA ES LA FUNCIÓN CLAVE CORREGIDA
-  // ====================================================================
   const handleProcessStart = async (file: File) => {
     if (!templateData?.deepgram_api_key) {
       setConfigError("Error: Falta la clave de API de Deepgram.");
@@ -159,7 +152,6 @@ export function AppContainer({ user }: AppContainerProps) {
     try {
       const supabase = createClient();
       
-      // 1. Crear el registro en Supabase para obtener un ID.
       console.log("Paso 1: Creando registro inicial en Supabase...");
       const { data: newActa, error: createError } = await supabase
         .from('actas')
@@ -170,25 +162,22 @@ export function AppContainer({ user }: AppContainerProps) {
       
       setCurrentActaId(newActa.id);
       
-      // 2. Subir el archivo a GCS.
       console.log("Paso 2: Subiendo archivo a GCS...");
       const { url: audioUrl, gcsPath } = await uploadToGCS(file);
       
-      // 3. Actualizar el registro del acta con la ruta.
       console.log("Paso 3: Actualizando el acta con la ruta del archivo...");
       await supabase.from('actas').update({ gcs_path: gcsPath }).eq('id', newActa.id);
 
       setProgress(20);
       setCurrentStep("transcribing");
       
-      // 4. Llamar a la API para *iniciar* la transcripción.
       console.log("Paso 4: Invocando a /api/transcribe...");
       const transRes = await fetch("/api/transcribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           audioUrl: audioUrl,
-          actaId: newActa.id, // <<-- La variable newActa SÍ existe en este contexto
+          actaId: newActa.id,
           deepgram_api_key: templateData.deepgram_api_key,
         }),
       });
@@ -210,41 +199,56 @@ export function AppContainer({ user }: AppContainerProps) {
   };
   
   // ====================================================================
-  // ESTA ES LA OTRA FUNCIÓN CLAVE NUEVA
+  // FUNCIÓN handleProcessFinished CORREGIDA
   // ====================================================================
-  const handleProcessFinished = async (finalActaData: ActaRow) => {
+  const handleProcessFinished = async (payloadFromRealtime: ActaRow) => {
     try {
-        if (!finalActaData.markdown) throw new Error("El acta se generó pero el contenido está vacío.");
+        // [NUEVO Y CRUCIAL] Hacemos una consulta final para obtener la fila completa y actualizada.
+        console.log("Estado 'generated' recibido. Obteniendo datos completos del acta desde Supabase...");
+        const supabase = createClient();
+        const { data: fullActaData, error: fetchError } = await supabase
+          .from('actas')
+          .select('*') // Seleccionamos todas las columnas
+          .eq('id', payloadFromRealtime.id) // Usamos el ID de la notificación de Realtime
+          .single();
+
+        if (fetchError || !fullActaData) {
+          throw new Error(`No se pudieron obtener los datos completos del acta: ${fetchError?.message}`);
+        }
+
+        // A partir de aquí, usamos 'fullActaData' que contiene toda la información.
+        if (!fullActaData.markdown) throw new Error("El acta se generó pero el contenido está vacío.");
 
         console.log("Paso Final: Generando documento DOCX...");
         const docGenRes = await fetch("/api/generate-docx", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ markdown: finalActaData.markdown, userId: user.id }),
+            body: JSON.stringify({ markdown: fullActaData.markdown, userId: user.id }),
         });
         if (!docGenRes.ok) throw new Error(`Error generando el DOCX: ${(await docGenRes.json()).message}`);
         
         const docBlob = await docGenRes.blob();
         const docUrl = URL.createObjectURL(docBlob);
         
+        // [CORREGIDO] Construimos el estado final usando 'fullActaData'
         setActaData({ 
-            title: finalActaData.file_name?.replace(/\.[^/.]+$/, "") || "Acta", 
-            date: new Date(finalActaData.created_at).toISOString().split("T")[0],
-            participants: finalActaData.speakers?.map((s) => s.name) || [], 
-            speakers: finalActaData.speakers || [],
-            summary: finalActaData.summary || "", 
-            agreements: finalActaData.agreements || [], 
-            transcript: finalActaData.diarized_transcript || "", 
+            title: fullActaData.file_name?.replace(/\.[^/.]+$/, "") || "Acta", 
+            date: new Date(fullActaData.created_at).toISOString().split("T")[0],
+            participants: (fullActaData.speakers as Speaker[])?.map((s) => s.name) || [], 
+            speakers: (fullActaData.speakers as Speaker[]) || [],
+            summary: fullActaData.summary || "", 
+            agreements: (fullActaData.agreements as string[]) || [], 
+            transcript: fullActaData.diarized_transcript || "", // ¡Ahora tendrá el valor correcto!
             duration: 0,
-            markdown: finalActaData.markdown, 
+            markdown: fullActaData.markdown, 
             docUrl 
         });
 
-        if (finalActaData.gcs_path) {
-            fetch("/api/delete-audio", { // Asumimos que esta API se adapta para GCS
+        if (fullActaData.gcs_path) {
+            fetch("/api/delete-audio", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ publicId: finalActaData.gcs_path }),
+                body: JSON.stringify({ publicId: fullActaData.gcs_path }),
             }).catch(err => console.error("La solicitud de borrado del audio falló:", err));
         }
 
@@ -291,16 +295,9 @@ export function AppContainer({ user }: AppContainerProps) {
           <ProcessingView step={currentStep} progress={progress} fileName={audioFile?.name || ""} fileSize={audioFile?.size || 0} />
         )}
 
-    
         {currentStep === "complete" && actaData && (
-          // ===============================================
-          // [NUEVO] CÓDIGO AÑADIDO PARA DEPURACIÓN
-          // ===============================================
-          <>
-            {console.log("DEBUG: Datos finales para ActaEditor:", actaData)}
-            <ActaEditor actaData={actaData} onReset={resetProcess} onUpdate={setActaData} />
-          </>
-          // ===============================================
+          // He quitado el log de depuración de aquí ya que el problema se ha solucionado
+          <ActaEditor actaData={actaData} onReset={resetProcess} onUpdate={setActaData} />
         )}
       </main>
       <Footer />
