@@ -1,125 +1,143 @@
 // ruta: app/api/transcribe-callback/route.ts
 
 import { NextResponse, NextRequest } from 'next/server';
-import { createClient } from '@/lib/supabase/server'; // ¡Importante! Usar el cliente de servidor aquí.
+import { createClient } from '@/lib/supabase/server';
 
-export const dynamic = "force-dynamic"; // Asegura que se ejecute como una función dinámica en Vercel
+export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-    // 1. Verificación de Seguridad: Asegurarse de que la llamada viene de nuestro flujo.
+    // ==========================================================
+    // INICIO DEL PROCESAMIENTO DEL CALLBACK
+    // ==========================================================
+    console.log("==========================================================");
+    console.log("[CALLBACK_INICIO] Recibida nueva petición en /api/transcribe-callback");
+    console.log(`[CALLBACK_INICIO] Timestamp: ${new Date().toISOString()}`);
+    // ==========================================================
+
+    // 1. Verificación de Seguridad
     const secret = req.nextUrl.searchParams.get('secret');
     if (secret !== process.env.CALLBACK_SECRET) {
-        console.warn("Llamada a callback de transcripción con secreto inválido.");
+        console.error("[CALLBACK_ERROR] Secreto de callback inválido o ausente.");
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    console.log("[CALLBACK_PASO_1] Verificación de secreto exitosa.");
 
     try {
         const deepgramPayload = await req.json();
         
-        // 2. Extraer el actaId que pasamos como 'tag' en la petición original.
+        // 2. Extraer el actaId
         const actaId = deepgramPayload.metadata?.tags?.[0];
         if (!actaId) {
-            console.error("Error: No se encontró 'actaId' en los metadatos del callback de Deepgram.", deepgramPayload.metadata);
+            console.error("[CALLBACK_ERROR] No se encontró 'actaId' en los metadatos del payload de Deepgram.", deepgramPayload.metadata);
             return NextResponse.json({ error: "actaId no encontrado en el payload" }, { status: 400 });
         }
-
-        console.log(`[Callback] Transcripción recibida para el acta: ${actaId}`);
+        console.log(`[CALLBACK_PASO_2] Extracción de actaId exitosa. ID: ${actaId}`);
         
-        // 3. Formatear la transcripción (movemos la lógica que antes estaba en /api/transcribe).
-        // Esta lógica convierte la salida de Deepgram en el formato [Speaker:X] que necesitamos.
+        // 3. Formatear la transcripción
         let formattedTranscription = "";
         const words = deepgramPayload.results?.channels?.[0]?.alternatives?.[0]?.words;
 
         if (words && Array.isArray(words)) {
-            let currentSpeaker: number | null = null;
-            let currentUtteranceBlock = "";
-            for (const wordInfo of words) {
-                const speaker = wordInfo.speaker;
-                if (speaker === undefined) {
-                    currentUtteranceBlock += wordInfo.word + " ";
-                    continue;
-                }
-                if (currentSpeaker === null) {
-                    currentSpeaker = speaker;
-                }
-                if (speaker !== currentSpeaker) {
-                    if (currentUtteranceBlock.trim() !== "") {
-                        formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}\n`;
-                    }
-                    currentSpeaker = speaker;
-                    currentUtteranceBlock = "";
-                }
-                currentUtteranceBlock += wordInfo.word + " ";
-            }
-            if (currentUtteranceBlock.trim() !== "" && currentSpeaker !== null) {
-                formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}`;
-            }
+            // ... (tu lógica de formateo, que ya sabemos que funciona bien) ...
+            let currentSpeaker = null, currentUtteranceBlock = "";
+            for (const wordInfo of words) { const speaker = wordInfo.speaker; if (speaker === undefined) { currentUtteranceBlock += wordInfo.word + " "; continue; } if (currentSpeaker === null) { currentSpeaker = speaker; } if (speaker !== currentSpeaker) { if (currentUtteranceBlock.trim() !== "") { formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}\n`; } currentSpeaker = speaker; currentUtteranceBlock = ""; } currentUtteranceBlock += wordInfo.word + " "; } if (currentUtteranceBlock.trim() !== "" && currentSpeaker !== null) { formattedTranscription += `[Speaker:${currentSpeaker}] ${currentUtteranceBlock.trim()}`; }
         } else {
-            // Fallback por si no vienen las palabras detalladas
             formattedTranscription = deepgramPayload.results?.channels?.[0]?.alternatives?.[0]?.transcript || "Transcripción no disponible.";
         }
         
-        // 4. Actualizar la base de datos de Supabase.
+        const transcriptLength = formattedTranscription.length;
+        console.log(`[CALLBACK_PASO_3] Formateo de transcripción completado. Longitud: ${transcriptLength} caracteres.`);
+        if (transcriptLength === 0) {
+            console.warn("[CALLBACK_ADVERTENCIA] La transcripción generada está vacía.");
+        }
+        
+        // ==========================================================
+        // 4. Actualizar la base de datos de Supabase (PUNTO CRÍTICO 1)
+        // ==========================================================
         const supabase = await createClient();
-        console.log(`[Callback] Actualizando acta ${actaId} en Supabase con status 'transcribed'.`);
-        const { error: updateError } = await supabase
+        console.log(`[CALLBACK_PASO_4_INICIO] Intentando actualizar acta ${actaId} en Supabase...`);
+        
+        const { data: updateData, error: updateError } = await supabase
             .from('actas')
             .update({
                 transcript: formattedTranscription.trim(),
-                status: 'transcribed' // ¡Cambiamos el estado! Esto notificará al cliente vía Realtime.
+                status: 'transcribed'
             })
-            .eq('id', actaId);
+            .eq('id', actaId)
+            .select(); // <<--- AÑADIMOS .select() PARA VER QUÉ DEVUELVE LA ACTUALIZACIÓN
 
         if (updateError) {
-            // Si falla la actualización, lanzamos un error para que sea capturado por el catch.
+            // Este es el log más importante si la DB falla
+            console.error(`[CALLBACK_ERROR_DB] Error al actualizar Supabase para el acta ${actaId}.`, updateError);
             throw new Error(`Error al actualizar el acta ${actaId} en Supabase: ${updateError.message}`);
         }
         
-        // 5. Disparar el siguiente paso: la identificación de hablantes en Cloud Run.
-        // ¡DEBES AÑADIR CLOUD_RUN_DIARIZE_URL y CLOUD_RUN_SECRET a tus variables de entorno!
+        console.log(`[CALLBACK_PASO_4_EXITO] Supabase actualizado exitosamente para el acta ${actaId}.`);
+        console.log("[CALLBACK_PASO_4_EXITO] Filas afectadas:", updateData?.length ?? 0);
+        if (updateData?.length === 0) {
+            console.error(`[CALLBACK_ERROR_DB] ¡ADVERTENCIA! La actualización no afectó a ninguna fila. ¿Existe el actaId ${actaId}?`);
+        }
+
+        // ==========================================================
+        // 5. Disparar Cloud Run (PUNTO CRÍTICO 2)
+        // ==========================================================
         if (!process.env.CLOUD_RUN_DIARIZE_URL || !process.env.CLOUD_RUN_SECRET) {
-            throw new Error("Las variables de entorno de Cloud Run no están configuradas.");
+            throw new Error("Las variables de entorno de Cloud Run para diarización no están configuradas.");
         }
         
-        console.log(`[Callback] Disparando proceso de diarización en Cloud Run para el acta: ${actaId}`);
-        // No necesitamos esperar la respuesta de Cloud Run, es otro "fire-and-forget".
-        fetch(process.env.CLOUD_RUN_DIARIZE_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                // Usamos un secreto para autenticar la llamada entre nuestros servicios.
-                'Authorization': `Bearer ${process.env.CLOUD_RUN_SECRET}` 
-            },
-            // Solo necesitamos enviar el ID. Cloud Run se encargará de obtener los datos de Supabase.
-            body: JSON.stringify({ actaId: actaId })
-        }).catch(err => {
-            // Capturamos el error aquí para que no rompa el flujo de respuesta a Deepgram,
-            // pero lo logueamos para depuración. En un escenario real, podríamos reintentar.
-            console.error(`[Callback] Fallo al invocar Cloud Run para el acta ${actaId}:`, err);
-        });
+        console.log(`[CALLBACK_PASO_5_INICIO] Preparando para llamar a Cloud Run. URL: ${process.env.CLOUD_RUN_DIARIZE_URL}`);
+        
+        // Usamos un try/catch específico para la llamada fetch para aislar su error
+        try {
+            const cloudRunResponse = await fetch(process.env.CLOUD_RUN_DIARIZE_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${process.env.CLOUD_RUN_SECRET}` 
+                },
+                body: JSON.stringify({ actaId: actaId })
+            });
 
-        // 6. Responder a Deepgram con un 200 OK para que sepa que recibimos el callback correctamente.
+            console.log(`[CALLBACK_PASO_5_RESPUESTA] Respuesta de Cloud Run recibida. Status: ${cloudRunResponse.status}`);
+
+            if (!cloudRunResponse.ok) {
+                const errorBody = await cloudRunResponse.text();
+                console.error(`[CALLBACK_ERROR_CR] La llamada a Cloud Run falló. Status: ${cloudRunResponse.status}. Body:`, errorBody);
+                // Decidimos si lanzar un error aquí o no. Por ahora, solo lo logueamos para no detener el flujo.
+            } else {
+                console.log(`[CALLBACK_PASO_5_EXITO] Llamada a Cloud Run para el acta ${actaId} enviada exitosamente.`);
+            }
+
+        } catch (fetchError: any) {
+            console.error("[CALLBACK_ERROR_FETCH] Fallo catastrófico al intentar hacer fetch a Cloud Run.", fetchError);
+            // Podríamos lanzar este error para que el catch principal lo maneje
+            throw fetchError;
+        }
+
+        // 6. Responder a Deepgram
+        console.log("[CALLBACK_FIN] Proceso completado. Enviando respuesta 200 a Deepgram.");
         return NextResponse.json({ success: true, message: "Callback procesado y siguiente paso iniciado." });
 
     } catch (error: any) {
-        console.error("[Callback] Error fatal procesando el callback de transcripción:", error.message);
-
-        // Intentamos marcar el acta como errónea en la DB para que el usuario sea notificado.
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.error("!!! [CALLBACK_ERROR_FATAL] Error en el bloque try-catch principal !!!");
+        console.error(`!!! Timestamp: ${new Date().toISOString()}`);
+        console.error("!!! Error:", error.message);
+        console.error("!!! Stack:", error.stack);
+        console.error("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        
+        // La lógica para marcar el acta como errónea no cambia...
         try {
-            const payloadForError = await req.clone().json(); // Clonamos para no consumir el body
+            const payloadForError = await req.clone().json();
             const actaIdForError = payloadForError.metadata?.tags?.[0];
             if (actaIdForError) {
                 const supabase = await createClient();
-                await supabase
-                    .from('actas')
-                    .update({ status: 'error', summary: 'Fallo durante el callback de transcripción.' })
-                    .eq('id', actaIdForError);
+                await supabase.from('actas').update({ status: 'error', summary: `Fallo en callback: ${error.message}` }).eq('id', actaIdForError);
             }
         } catch (e) {
-            console.error("[Callback] No se pudo ni siquiera marcar el acta como errónea:", e);
+            console.error("[CALLBACK_ERROR_FATAL] No se pudo ni siquiera marcar el acta como errónea en la DB.", e);
         }
         
-        // Devolvemos un error 500 para que Deepgram sepa que el procesamiento falló de nuestro lado.
         return NextResponse.json({ error: "Internal Server Error", details: error.message }, { status: 500 });
     }
 }
