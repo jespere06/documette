@@ -71,34 +71,45 @@ export function AppContainer({ user }: AppContainerProps) {
     handleProcess(file)
   }
 
-  const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }> => {
-    const getSignedUrlRes = await fetch('/api/sign-gcs-upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileName: file.name, fileType: file.type })
-    });
+// En AppContainer.tsx
+
+const uploadToGCS = async (file: File): Promise<{ url: string; gcsPath: string }> => {
+  // ANTES:
+  // const getSignedUrlRes = await fetch('/api/sign-gcs-upload', {
   
-    if (!getSignedUrlRes.ok) {
-      throw new Error('No se pudo obtener una URL firmada para subir el archivo.');
-    }
-  
-    const { signedUrl, publicUrl, gcsPath } = await getSignedUrlRes.json();
-  
-    const uploadRes = await fetch(signedUrl, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': file.type,
-        'x-goog-acl': 'public-read'
-      },
-      body: file
-    });
-  
-    if (!uploadRes.ok) {
-      throw new Error('Error al subir el archivo a Google Cloud Storage.');
-    }
-  
-    return { url: publicUrl, gcsPath };
-  };
+  // AHORA (CORREGIDO):
+  const getSignedUrlRes = await fetch('/api/generate-upload-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fileName: file.name, contentType: file.type })
+  });
+
+  if (!getSignedUrlRes.ok) {
+    throw new Error('No se pudo obtener una URL firmada para subir el archivo.');
+  }
+
+  // [IMPORTANTE] Asegurémonos de que la desestructuración coincida
+  // con lo que devuelve tu API /generate-upload-url
+  // Tu API devuelve: { signedUrl, publicUrl, fileName }
+  // Necesitamos adaptar la lógica para usar `fileName` como el `gcsPath`.
+  const { signedUrl, publicUrl, fileName: gcsPath } = await getSignedUrlRes.json();
+
+  const uploadRes = await fetch(signedUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': file.type,
+    },
+    body: file
+  });
+
+  if (!uploadRes.ok) {
+    const errorText = await uploadRes.text();
+    console.error("Error al subir a GCS:", errorText);
+    throw new Error('Error al subir el archivo a Google Cloud Storage.');
+  }
+
+  return { url: publicUrl, gcsPath }; // gcsPath ahora es el uniqueFileName
+};
   
   const handleProcess = async (file: File) => {
     if (!templateData?.deepgram_api_key || !templateData?.gemini_api_key) {
