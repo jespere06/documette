@@ -43,40 +43,54 @@ export async function POST(req: NextRequest) {
         }
         console.log(`[Callback Intermedio] Supabase actualizado.`);
 
-        // 2. Disparar el siguiente paso en Cloud Run SIN ESPERAR la respuesta.
-        if (!process.env.CLOUD_RUN_GENERATE_URL || !process.env.CLOUD_RUN_SECRET) {
-            throw new Error("Las variables de entorno para el servicio 'generate-acta' no están configuradas.");
+        // 2. Disparar el siguiente paso con logging robusto
+        const targetUrl = process.env.CLOUD_RUN_GENERATE_URL;
+        const secretToken = process.env.CLOUD_RUN_SECRET;
+
+        if (!targetUrl || !secretToken) {
+            throw new Error("Las variables de entorno CLOUD_RUN_GENERATE_URL o CLOUD_RUN_SECRET no están configuradas.");
         }
 
         const fetchOptions: RequestInit = {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.CLOUD_RUN_SECRET}`
+                'Authorization': `Bearer ${secretToken}`
             },
             body: JSON.stringify({ actaId: actaId })
         };
-
-        console.log(`[Callback Intermedio] Disparando proceso a /generate-acta para: ${actaId} (fire-and-forget).`);
         
-        // [CAMBIO CLAVE] Se quita el 'await' de la llamada fetch.
-        // La función de Vercel no se quedará esperando a que Cloud Run termine.
-        fetch(process.env.CLOUD_RUN_GENERATE_URL, fetchOptions).catch(err => {
-            // Añadimos un .catch para loguear si la *iniciación* de la llamada falla (ej. error de DNS).
-            // Esto no captura errores de respuesta del servidor (como 500), solo errores de red.
-            console.error(`[Callback Intermedio] Fallo de red al intentar invocar /generate-acta:`, (err as Error).message);
-            
-            // Opcional: Podríamos intentar marcar el acta como error aquí también.
-            const supabaseForError = createAdminClient();
-            supabaseForError.from('actas').update({ status: 'error', summary: 'Fallo de red al llamar a generate-acta' }).eq('id', actaId);
-        });
+        // Log de depuración antes de la llamada
+        console.log(`[Callback Intermedio] Disparando a: ${targetUrl}`);
+        console.log(`[Callback Intermedio] Con Payload: ${fetchOptions.body}`);
+
+        // Llamada "fire-and-forget" con manejo de errores y respuestas
+        fetch(targetUrl, fetchOptions)
+            .then(async (res) => {
+                // Logueamos el status de la respuesta SIEMPRE
+                console.log(`[Callback Intermedio] /generate-acta respondió con status: ${res.status}`);
+                if (!res.ok) {
+                    // Si la respuesta no es 2xx, es un error del servidor de Cloud Run
+                    const errorBody = await res.text();
+                    console.error(`[Callback Intermedio] Cuerpo del error de /generate-acta:`, errorBody);
+                    // Marcar el acta como error en la DB para notificar al usuario
+                    const supabaseErrorClient = createAdminClient();
+                    await supabaseErrorClient.from('actas').update({ status: 'error', summary: `Llamada a generate-acta falló con status ${res.status}` }).eq('id', actaId);
+                }
+            })
+            .catch(err => {
+                // Captura errores de red (ej. ECONNRESET, no se puede resolver el DNS, etc.)
+                console.error(`[Callback Intermedio] Error de red al invocar /generate-acta:`, (err as Error).message);
+                const supabaseErrorClient = createAdminClient();
+                supabaseErrorClient.from('actas').update({ status: 'error', summary: `Error de red al llamar a generate-acta` }).eq('id', actaId);
+            });
         
         // 3. Devolvemos la respuesta inmediatamente.
         console.log("[Callback Intermedio] Llamada a /generate-acta disparada. Respondiendo 200 OK.");
         return NextResponse.json({ success: true, message: "Siguiente paso iniciado." });
 
     } catch (error: any) {
-        console.error("[Callback Intermedio] Error fatal:", error.message);
+        console.error("[Callback Intermedio] Error fatal en el bloque principal:", error.message);
         
         if (actaIdFromRequest) {
             const supabase = createAdminClient();
