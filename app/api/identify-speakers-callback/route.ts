@@ -15,15 +15,11 @@ export async function POST(req: NextRequest) {
     let actaIdFromRequest: string | null = null;
 
     try {
-        // [CORRECCIÓN DEFINITIVA] Leemos el cuerpo de la petición UNA SOLA VEZ.
         const { actaId, diarizedTranscript, summary, speakers } = await req.json();
-        
-        // Guardamos el ID en una variable externa para poder usarlo en el bloque catch.
         actaIdFromRequest = actaId;
 
-        // Validamos que todos los datos necesarios llegaron en el cuerpo.
         if (!actaId || !diarizedTranscript || !summary || !speakers) {
-            console.error("Payload incompleto recibido en /api/identify-speakers-callback.", { actaId, hasDiarized: !!diarizedTranscript, hasSummary: !!summary, hasSpeakers: !!speakers });
+            console.error("Payload incompleto recibido en /api/identify-speakers-callback.", { actaId });
             return NextResponse.json({ error: "Faltan datos en el payload del callback." }, { status: 400 });
         }
 
@@ -47,7 +43,7 @@ export async function POST(req: NextRequest) {
         }
         console.log(`[Callback Intermedio] Supabase actualizado.`);
 
-        // 2. Disparar el siguiente paso en Cloud Run
+        // 2. Disparar el siguiente paso en Cloud Run SIN ESPERAR la respuesta.
         if (!process.env.CLOUD_RUN_GENERATE_URL || !process.env.CLOUD_RUN_SECRET) {
             throw new Error("Las variables de entorno para el servicio 'generate-acta' no están configuradas.");
         }
@@ -61,21 +57,27 @@ export async function POST(req: NextRequest) {
             body: JSON.stringify({ actaId: actaId })
         };
 
-        console.log(`[Callback Intermedio] Disparando proceso a /generate-acta para: ${actaId}`);
-        const cloudRunResponse = await fetch(process.env.CLOUD_RUN_GENERATE_URL, fetchOptions);
-
-        if (!cloudRunResponse.ok) {
-            const errorBody = await cloudRunResponse.text();
-            throw new Error(`La llamada a /generate-acta falló. Status: ${cloudRunResponse.status}. Body: ${errorBody}`);
-        }
+        console.log(`[Callback Intermedio] Disparando proceso a /generate-acta para: ${actaId} (fire-and-forget).`);
         
-        console.log("[Callback Intermedio] Llamada a /generate-acta enviada exitosamente.");
+        // [CAMBIO CLAVE] Se quita el 'await' de la llamada fetch.
+        // La función de Vercel no se quedará esperando a que Cloud Run termine.
+        fetch(process.env.CLOUD_RUN_GENERATE_URL, fetchOptions).catch(err => {
+            // Añadimos un .catch para loguear si la *iniciación* de la llamada falla (ej. error de DNS).
+            // Esto no captura errores de respuesta del servidor (como 500), solo errores de red.
+            console.error(`[Callback Intermedio] Fallo de red al intentar invocar /generate-acta:`, (err as Error).message);
+            
+            // Opcional: Podríamos intentar marcar el acta como error aquí también.
+            const supabaseForError = createAdminClient();
+            supabaseForError.from('actas').update({ status: 'error', summary: 'Fallo de red al llamar a generate-acta' }).eq('id', actaId);
+        });
+        
+        // 3. Devolvemos la respuesta inmediatamente.
+        console.log("[Callback Intermedio] Llamada a /generate-acta disparada. Respondiendo 200 OK.");
         return NextResponse.json({ success: true, message: "Siguiente paso iniciado." });
 
     } catch (error: any) {
-        console.error("[Callback Intermedio] Error fatal:", error.message, error.stack);
+        console.error("[Callback Intermedio] Error fatal:", error.message);
         
-        // El bloque catch ahora usa la variable 'actaIdFromRequest' que guardamos.
         if (actaIdFromRequest) {
             const supabase = createAdminClient();
             await supabase.from('actas').update({ status: 'error', summary: `Fallo en callback de diarización: ${error.message}` }).eq('id', actaIdFromRequest);
