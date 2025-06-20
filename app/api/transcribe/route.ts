@@ -1,5 +1,7 @@
-// app/api/transcribe/route.ts
+// ruta: app/api/transcribe/route.ts
+
 import { NextResponse, NextRequest } from "next/server";
+import { createAdminClient } from '@/lib/supabase/admin';
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,60 +14,76 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 1. Construir la URL del callback (sin cambios)
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-    const callbackUrlWithSecret = new URL('/api/transcribe-callback', appUrl);
-    
-    if (!process.env.CALLBACK_SECRET) {
-        console.error("CRITICAL: La variable de entorno CALLBACK_SECRET no está configurada.");
-        throw new Error("Server configuration error: Callback secret is missing.");
+    // ==========================================================
+    // [CAMBIO CLAVE] Construimos la URL del callback apuntando a Cloud Run
+    // ==========================================================
+    if (!process.env.CLOUD_RUN_CALLBACK_URL || !process.env.CALLBACK_SECRET) {
+        throw new Error("La URL de callback de Cloud Run o el secreto no están configurados en Vercel.");
     }
-    callbackUrlWithSecret.searchParams.append('secret', process.env.CALLBACK_SECRET);
+    
+    // 1. Tomamos la URL base del nuevo servicio en Cloud Run
+    const callbackUrl = new URL(process.env.CLOUD_RUN_CALLBACK_URL);
+    // 2. Le añadimos el secreto para la verificación
+    callbackUrl.searchParams.append('secret', process.env.CALLBACK_SECRET);
 
-    // 2. Construir la URL de la API de Deepgram con todos los parámetros
+    // 3. Construimos la URL de la API de Deepgram
     const deepgramUrl = new URL('https://api.deepgram.com/v1/listen');
     deepgramUrl.searchParams.append('model', 'nova-3');
     deepgramUrl.searchParams.append('smart_format', 'true');
     deepgramUrl.searchParams.append('punctuate', 'true');
     deepgramUrl.searchParams.append('diarize', 'true');
     deepgramUrl.searchParams.append('language', 'multi');
-    deepgramUrl.searchParams.append('tag', actaId); // Pasamos el actaId como tag
-    deepgramUrl.searchParams.append('callback', callbackUrlWithSecret.toString()); // ¡El callback!
+    deepgramUrl.searchParams.append('tag', actaId);
+    // 4. Le pasamos a Deepgram la URL completa del callback en Cloud Run
+    deepgramUrl.searchParams.append('callback', callbackUrl.toString());
 
-    console.log(`[Transcribe API - fetch] Iniciando transcripción para actaId: ${actaId}`);
-    console.log(`[Transcribe API - fetch] URL de Deepgram: ${deepgramUrl.toString()}`);
+    console.log(`[Transcribe API] Iniciando transcripción. Callback apuntará a Cloud Run para el acta: ${actaId}`);
 
-    // 3. Realizar la llamada a la API con fetch
+    // 5. Realizar la llamada a la API de Deepgram
     const deepgramResponse = await fetch(deepgramUrl.toString(), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Token ${deepgram_api_key}`
       },
-      body: JSON.stringify({
-        url: audioUrl,
-      }),
+      body: JSON.stringify({ url: audioUrl }),
     });
 
-    // 4. Verificar la respuesta de Deepgram
-    // En una llamada asíncrona, Deepgram debería devolver un 200 o 201 si aceptó la petición.
     if (!deepgramResponse.ok) {
       const errorBody = await deepgramResponse.json();
-      console.error("Error en la respuesta de Deepgram:", errorBody);
       throw new Error(`Deepgram API devolvió un error: ${errorBody.err_msg || deepgramResponse.statusText}`);
     }
     
     const responseData = await deepgramResponse.json();
-    console.log("[Transcribe API - fetch] Petición enviada a Deepgram. Response:", responseData);
+    const requestId = responseData.request_id;
 
-    // Respondemos inmediatamente al cliente
+    if (!requestId) {
+        throw new Error("Deepgram no devolvió un request_id en la respuesta.");
+    }
+    
+    console.log(`[Transcribe API] Petición enviada. Request ID: ${requestId}`);
+
+    // 6. Guardar el request_id en Supabase
+    const supabase = createAdminClient();
+    const { error: updateError } = await supabase
+      .from('actas')
+      .update({ deepgram_request_id: requestId })
+      .eq('id', actaId);
+
+    if (updateError) {
+      console.error(`[Transcribe API] ADVERTENCIA: Error al guardar el request_id para el acta ${actaId}:`, updateError.message);
+    } else {
+      console.log(`[Transcribe API] Request ID guardado exitosamente para el acta ${actaId}.`);
+    }
+
+    // 7. Responder al cliente
     return NextResponse.json(
-      { message: "Proceso de transcripción iniciado correctamente.", deepgram_request_id: responseData.request_id },
+      { message: "Proceso de transcripción iniciado correctamente." },
       { status: 202 }
     );
 
   } catch (error: any) {
-    console.error("Error en /api/transcribe (usando fetch):", error.message);
+    console.error("Error fatal en /api/transcribe:", error.message);
     return NextResponse.json({ error: "Error iniciando la transcripción", details: error.message }, { status: 500 });
   }
 }
