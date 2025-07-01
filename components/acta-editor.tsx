@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -11,7 +11,6 @@ import {
   Edit3,
   Save,
   RotateCcw,
-  Share2,
   Users,
   FileText,
   Copy,
@@ -22,6 +21,7 @@ import {
   MessageSquare,
   Eye,
   Send,
+  // Code, // Eliminado
 } from "lucide-react"
 import type { ActaData } from "@/app/page"
 
@@ -29,13 +29,18 @@ interface ActaEditorProps {
   actaData: ActaData
   onReset: () => void
   onUpdate: (data: ActaData) => void
+  isLoadingExtraData?: boolean
 }
 
-export function ActaEditor({ actaData, onReset, onUpdate }: ActaEditorProps) {
+export function ActaEditor({ actaData, onReset, onUpdate, isLoadingExtraData }: ActaEditorProps) {
   const [isEditing, setIsEditing] = useState(false)
-  const [editedData, setEditedData] = useState(actaData)
+  const [editedData, setEditedData] = useState<ActaData>(actaData)
 
-  const handleSave = () => {
+  useEffect(() => {
+    setEditedData(actaData);
+  }, [actaData]);
+
+  const handleSave = async () => {
     onUpdate(editedData)
     setIsEditing(false)
   }
@@ -46,23 +51,23 @@ export function ActaEditor({ actaData, onReset, onUpdate }: ActaEditorProps) {
       alert("Error: No se ha podido encontrar el archivo del documento.")
       return
     }
+    
+    let downloadableUrl = editedData.docUrl;
+    if (downloadableUrl.startsWith("gs://")) {
+        const bucketAndPath = downloadableUrl.substring(5);
+        downloadableUrl = `https://storage.googleapis.com/${bucketAndPath}`;
+    }
+
     const a = document.createElement("a")
-    a.href = editedData.docUrl
+    a.href = downloadableUrl 
     a.download = `acta-${editedData.title.replace(/\s+/g, "-").toLowerCase()}.docx`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
   }
-
-  const handleShare = () => {
-    navigator.clipboard.writeText(`Acta: ${editedData.title}\nFecha: ${editedData.date}`)
-  }
   
-  // --- NUEVA FUNCIÓN PARA ENVIAR POR EMAIL ---
   const handleEmailShare = () => {
     const subject = `Acta de la reunión: ${editedData.title}`
-
-    // Formateamos el cuerpo del email para que sea legible
     const body = `
 Hola,
 
@@ -85,19 +90,19 @@ ${editedData.agreements.map((agreement, index) => `${index + 1}. ${agreement}`).
 
 ----------------------------------------
 
+Puedes descargar el acta completa aquí: ${editedData.docUrl.startsWith("gs://") ? `https://storage.googleapis.com/${editedData.docUrl.substring(5)}` : editedData.docUrl}
+
 Saludos.
-    `.trim() // .trim() elimina espacios en blanco al inicio y al final
+    `.trim()
 
-    // Creamos el enlace mailto y lo codificamos para que sea una URL válida
     const mailtoLink = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
-
-    // Abrimos el cliente de correo del usuario
     window.location.href = mailtoLink
   }
-  // --- FIN DE LA NUEVA FUNCIÓN ---
 
   const renderFormattedTranscript = (text: string) => {
-    if (!text) return null
+    if (!text || text.startsWith("Cargando") || text.startsWith("Error al cargar") || text === "Contenido no disponible.") {
+        return <p className="text-slate-500 italic">{isLoadingExtraData && text.startsWith("Cargando") ? "Cargando transcripción..." : text}</p>;
+    }
     const paragraphs = text.split("\n\n")
     return paragraphs.map((paragraph, pIndex) => (
       <p key={`p-${pIndex}`} className="mb-3 last:mb-0">
@@ -111,6 +116,10 @@ Saludos.
     ))
   }
 
+  const isContentLoadingOrError = (content: string) => {
+    return !content || content.startsWith("Cargando") || content.startsWith("Error al cargar") || content === "Contenido no disponible.";
+  }
+
   return (
     <div className="space-y-4">
       <Card className="p-3 bg-white border border-slate-200">
@@ -120,8 +129,7 @@ Saludos.
             <div>
               <h2 className="font-semibold text-slate-900 text-sm">Acta generada exitosamente</h2>
               <p className="text-xs text-slate-600">
-                {Math.floor(actaData.duration / 60)}:{(actaData.duration % 60).toString().padStart(2, "0")} min •{" "}
-                {actaData.participants.length} participantes • {actaData.agreements.length} acuerdos
+                {editedData.participants.length} participantes • {editedData.agreements.length} acuerdos
               </p>
             </div>
           </div>
@@ -136,7 +144,7 @@ Saludos.
               <Edit3 className="w-3 h-3 mr-1" />
               {isEditing ? "Cancelar" : "Editar"}
             </Button>
-            <Button size="sm" onClick={handleDownload} className="bg-slate-900 hover:bg-slate-800 text-white px-3 py-1">
+            <Button size="sm" onClick={handleDownload} className="bg-slate-900 hover:bg-slate-800 text-white px-3 py-1" disabled={!editedData.docUrl}>
               <Download className="w-3 h-3 mr-1" />
               Descargar
             </Button>
@@ -165,7 +173,7 @@ Saludos.
                   {isEditing ? (
                     <Input type="date" value={editedData.date} onChange={(e) => setEditedData({ ...editedData, date: e.target.value })} className="border-slate-300 text-xs h-8" />
                   ) : (
-                    <p className="text-slate-700 text-xs">{new Date(editedData.date).toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })}</p>
+                    <p className="text-slate-700 text-xs">{new Date(editedData.date + 'T00:00:00').toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" })}</p>
                   )}
                 </div>
               </div>
@@ -198,7 +206,8 @@ Saludos.
         <div className="lg:col-span-2">
           <Card className="overflow-hidden border border-slate-200">
             <Tabs defaultValue="overview" className="w-full">
-              <TabsList className="grid w-full grid-cols-3 bg-slate-50 border-b border-slate-200 p-0">
+              {/* Ajustado a grid-cols-3 ya que se eliminó Markdown */}
+              <TabsList className="grid w-full grid-cols-3 bg-slate-50 border-b border-slate-200 p-0"> 
                 <TabsTrigger value="overview" className="data-[state=active]:bg-white data-[state=active]:border-b-2 data-[state=active]:border-slate-900 font-medium py-2 text-xs">
                   <Eye className="w-3 h-3 mr-1" /> Resumen
                 </TabsTrigger>
@@ -221,7 +230,7 @@ Saludos.
                     <Textarea value={editedData.summary} onChange={(e) => setEditedData({ ...editedData, summary: e.target.value })} rows={4} className="border-slate-300 text-xs" />
                   ) : (
                     <Card className="p-3 bg-slate-50 border border-slate-200">
-                      <p className="text-slate-800 leading-relaxed text-xs">{editedData.summary}</p>
+                      <p className="text-slate-800 leading-relaxed text-xs whitespace-pre-line">{editedData.summary}</p>
                     </Card>
                   )}
                 </div>
@@ -239,7 +248,7 @@ Saludos.
                       {editedData.agreements.map((agreement, index) => (
                         <div key={index} className="flex items-start space-x-2 p-2 bg-slate-50 rounded border border-slate-200">
                           <div className="w-5 h-5 bg-slate-900 text-white rounded flex items-center justify-center font-bold text-xs mt-0.5">{index + 1}</div>
-                          <p className="text-slate-800 flex-1 text-xs leading-relaxed">{agreement}</p>
+                          <p className="text-slate-800 flex-1 text-xs leading-relaxed whitespace-pre-line">{agreement}</p>
                         </div>
                       ))}
                     </div>
@@ -255,7 +264,7 @@ Saludos.
                       </div>
                       <h3 className="font-semibold text-slate-900 text-sm">Transcripción Completa</h3>
                     </div>
-                    <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(editedData.transcript)} className="border-slate-300 text-xs px-2 py-1">
+                    <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(editedData.transcript)} className="border-slate-300 text-xs px-2 py-1" disabled={isContentLoadingOrError(editedData.transcript)}>
                       <Copy className="w-3 h-3 mr-1" /> Copiar
                     </Button>
                   </div>
@@ -272,6 +281,7 @@ Saludos.
                   )}
                 </div>
               </TabsContent>
+              {/* TabsContent para Markdown eliminado */}
               <TabsContent value="export" className="p-4">
                 <div className="space-y-3">
                   <h3 className="font-semibold text-slate-900 text-sm">Opciones de Exportación</h3>
@@ -285,12 +295,11 @@ Saludos.
                           <h4 className="font-medium text-slate-900 text-xs">Documento Word</h4>
                           <p className="text-slate-600 text-xs">Descarga .docx</p>
                         </div>
-                        <Button size="sm" className="w-full bg-slate-900 hover:bg-slate-800 text-white py-1 text-xs" onClick={handleDownload}>
+                        <Button size="sm" className="w-full bg-slate-900 hover:bg-slate-800 text-white py-1 text-xs" onClick={handleDownload} disabled={!editedData.docUrl}>
                           <Download className="w-3 h-3 mr-1" /> Descargar
                         </Button>
                       </div>
                     </Card>
-                    {/* --- ÁREA MODIFICADA --- */}
                     <Card className="p-3 cursor-pointer border border-slate-200 hover:border-slate-300 transition-colors" onClick={handleEmailShare}>
                       <div className="text-center space-y-2">
                         <div className="w-8 h-8 bg-slate-100 rounded-lg flex items-center justify-center mx-auto">
@@ -300,12 +309,11 @@ Saludos.
                           <h4 className="font-medium text-slate-900 text-xs">Envío Email</h4>
                           <p className="text-slate-600 text-xs">Compartir por correo</p>
                         </div>
-                        <Button variant="outline" size="sm" className="w-full border-slate-300 py-1 text-xs" onClick={handleEmailShare}>
+                        <Button variant="outline" size="sm" className="w-full border-slate-300 py-1 text-xs" onClick={handleEmailShare} disabled={!editedData.docUrl}>
                           <Mail className="w-3 h-3 mr-1" /> Enviar
                         </Button>
                       </div>
                     </Card>
-                    {/* --- FIN DEL ÁREA MODIFICADA --- */}
                   </div>
                 </div>
               </TabsContent>
