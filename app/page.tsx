@@ -6,7 +6,8 @@ import { redirect } from "next/navigation";
 import { AppContainer } from "@/components/app-container";
 
 // El estado del proceso ahora es el 'status' de la tabla de trabajos
-export type JobStatus = "downloading" | "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "complete" | "error";
+// AGREGADO "fetching" al tipo JobStatus
+export type JobStatus = "downloading" | "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "fetching" | "complete" | "error";
 
 // Este tipo debe coincidir con la estructura de tu tabla 'job_instances'
 export interface JobInstance {
@@ -46,7 +47,7 @@ export interface ActaData {
 export default async function Home() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-
+  
   if (!user) {
     redirect("/login")
   }

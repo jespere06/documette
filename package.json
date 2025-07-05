@@ -11,6 +11,8 @@
   "dependencies": {
     "@ai-sdk/openai": "latest",
     "@deepgram/sdk": "^4.4.0",
+    "@distube/ytdl-core": "^4.16.12",
+    "@google-cloud/run": "^2.1.0",
     "@google-cloud/storage": "^7.16.0",
     "@google/genai": "^1.5.1",
     "@google/generative-ai": "^0.24.1",
@@ -67,6 +69,8 @@
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.1.0",
     "vaul": "^0.9.6",
+    "youtube-dl-exec": "^3.0.22",
+    "ytdl-core": "^4.11.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {

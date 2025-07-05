@@ -15,7 +15,7 @@ import type { ActaData, Speaker } from "@/app/page" // Asumiendo que Speaker y A
 import { v4 as uuidv4 } from 'uuid';
 
 // Estados del trabajo según el roadmap del backend
-type JobStatus = "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "complete" | "error";
+type JobStatus = "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "complete" | "error" | "fetching";
 
 // Tipo para un registro de trabajo de la tabla job_instances
 export interface Job { 
@@ -53,11 +53,12 @@ const capitalizeTitle = (fileName: string): string => {
 
 const mapStatusToProgress = (status: JobStatus): number => {
     const progressMap: Record<JobStatus, number> = {
-        uploading: 5,
-        uploaded: 15,
-        transcribed: 35,
-        diarized: 60,
-        generated: 80,
+        fetching: 10,
+        uploading: 15,
+        uploaded: 25,
+        transcribed: 45,
+        diarized: 70,
+        generated: 90,
         complete: 100,
         error: 100, 
     };
@@ -70,6 +71,7 @@ export function AppContainer({ user }: AppContainerProps) {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [configError, setConfigError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false);
+  const [isProcessingUrl, setIsProcessingUrl] = useState(false); // Nuevo estado para descarga de YouTube
   const [currentFileSize, setCurrentFileSize] = useState(0); // Para ProcessingView
   
   const [fullActaData, setFullActaData] = useState<ActaData | null>(null);
@@ -171,16 +173,16 @@ export function AppContainer({ user }: AppContainerProps) {
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (isUploading) {
+      if (isUploading || isProcessingUrl) {
         event.preventDefault();
-        event.returnValue = "La subida de un archivo está en progreso. ¿Estás seguro de que quieres salir? El proceso se cancelará.";
+        event.returnValue = "Un proceso está en progreso. ¿Estás seguro de que quieres salir?";
       }
     };
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [isUploading]);
+  }, [isUploading, isProcessingUrl]);
 
   useEffect(() => {
     const fetchTemplateConfig = async () => {
@@ -330,7 +332,8 @@ export function AppContainer({ user }: AppContainerProps) {
     };
   }, [user.id]); 
 
-  const handleFileUpload = useCallback(async (file: File) => {
+  // FUNCIÓN PARA SUBIDA DE ARCHIVOS (sin cambios)
+  const handleFileUpload = useCallback(async (file: File, jobId?: string) => {
     if (!user?.id) {
         setConfigError("Usuario no identificado. No se puede subir el archivo.");
         return;
@@ -343,34 +346,46 @@ export function AppContainer({ user }: AppContainerProps) {
     setCurrentFileSize(file.size);
 
     const supabase = createClient();
-    const jobId = uuidv4();
+    const finalJobId = jobId || uuidv4();
     let jobCreatedInDb = false;
 
-    const optimisticJob: Job = {
-        id: jobId,
-        user_id: user.id,
-        title: capitalizeTitle(file.name),
-        status: 'uploading',
-        created_at: new Date().toISOString(),
-        audio_url: null, transcription_url: null, transcription_diarized_url: null,
-        speakers_list: null, markdown_url: null, summary: null, agreements: null, docx_url: null,
-    };
-    setActiveJob(optimisticJob);
-    setFullActaData(null);
+    // Solo crear el job optimistic y el registro en DB si no se pasó un jobId
+    if (!jobId) {
+        const optimisticJob: Job = {
+            id: finalJobId,
+            user_id: user.id,
+            title: capitalizeTitle(file.name),
+            status: 'uploading',
+            created_at: new Date().toISOString(),
+            audio_url: null, transcription_url: null, transcription_diarized_url: null,
+            speakers_list: null, markdown_url: null, summary: null, agreements: null, docx_url: null,
+        };
+        setActiveJob(optimisticJob);
+        setFullActaData(null);
+        
+        try {
+            const { error: insertError } = await supabase
+                .from('job_instances').insert({
+                    id: finalJobId, user_id: user.id, title: capitalizeTitle(file.name), status: 'uploading' 
+                });
+            if (insertError) throw new Error(`Fallo al crear el registro en la base de datos: ${insertError.message}`);
+            jobCreatedInDb = true; 
+        } catch (err: any) {
+            console.error("[AppContainer] Error creating job in DB:", err.message);
+            setConfigError(`Error creando trabajo: ${err.message}`);
+            setActiveJob(null);
+            setIsUploading(false);
+            return;
+        }
+    }
+
     setIsUploading(true);
 
     try {
-        const { error: insertError } = await supabase
-            .from('job_instances').insert({
-                id: jobId, user_id: user.id, title: capitalizeTitle(file.name), status: 'uploading' 
-            });
-        if (insertError) throw new Error(`Fallo al crear el registro en la base de datos: ${insertError.message}`);
-        jobCreatedInDb = true; 
-        
         const getSignedUrlRes = await fetch('/api/sign-gcs-upload', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jobId: jobId, fileName: file.name, fileType: file.type })
+            body: JSON.stringify({ jobId: finalJobId, fileName: file.name, fileType: file.type })
         });
         if (!getSignedUrlRes.ok) {
             const errorBody = await getSignedUrlRes.text().catch(() => "Could not retrieve error body");
@@ -384,17 +399,79 @@ export function AppContainer({ user }: AppContainerProps) {
             const gcsErrorBody = await uploadRes.text().catch(() => "Could not retrieve error body");
             throw new Error(`Fallo la subida a GCS: ${uploadRes.status}. Detalle: ${gcsErrorBody}`);
         }
-        console.log("[AppContainer] File upload to GCS complete for job " + jobId);
+        console.log("[AppContainer] File upload to GCS complete for job " + finalJobId);
         
     } catch (err: any) {
         console.error("[AppContainer] Critical error in upload process:", err.message);
         setConfigError(`Error en subida: ${err.message}`); 
-        if (jobCreatedInDb) await supabase.from('job_instances').delete().eq('id', jobId);
-        setActiveJob(prevJob => (prevJob?.id === jobId ? null : prevJob));
+        if (jobCreatedInDb) await supabase.from('job_instances').delete().eq('id', finalJobId);
+        setActiveJob(prevJob => (prevJob?.id === finalJobId ? null : prevJob));
     } finally {
         setIsUploading(false);
     }
   }, [user?.id, isLoadingConfig, templateData, configError]); 
+
+  // FUNCIÓN COMPLETAMENTE NUEVA: handleUrlSubmit con técnica del enlace invisible
+  const handleUrlSubmit = useCallback(async (youtubeUrl: string) => {
+    if (!user?.id) {
+        setConfigError("Usuario no identificado. No se puede procesar la URL.");
+        return;
+    }
+    if (isLoadingConfig || !templateData) {
+        alert("Espere a que la configuración se cargue o resuelva errores de configuración.");
+        return;
+    }
+    
+    setIsProcessingUrl(true);
+    setConfigError(null);
+    
+    try {
+        console.log("[AppContainer] Fetching YouTube audio info from API...");
+        
+        // Llamar a la API simplificada que solo devuelve JSON
+        const apiResponse = await fetch(`/api/get-stream?url=${encodeURIComponent(youtubeUrl)}`);
+        
+        if (!apiResponse.ok) {
+            const errorBody = await apiResponse.text().catch(() => "Could not retrieve error body");
+            throw new Error(`Error del servidor al obtener información del audio: ${apiResponse.status} - ${errorBody}`);
+        }
+        
+        const { title, stream_url } = await apiResponse.json();
+        
+        if (!stream_url) {
+            throw new Error("No se recibió una URL de descarga válida del servidor.");
+        }
+        
+        console.log("[AppContainer] Received audio info:", { title, stream_url });
+        
+        // Implementar la técnica del enlace invisible para iniciar la descarga
+        const downloadLink = document.createElement('a');
+        downloadLink.href = stream_url;
+        downloadLink.download = `${title}.mp3`;
+        downloadLink.style.display = 'none';
+        
+        // Añadir al DOM temporalmente
+        document.body.appendChild(downloadLink);
+        
+        // Simular el clic para iniciar la descarga
+        downloadLink.click();
+        
+        // Limpiar el elemento del DOM
+        document.body.removeChild(downloadLink);
+        
+        console.log("[AppContainer] Download initiated for:", title);
+        
+        // Mostrar mensaje de éxito temporal
+        setConfigError(null);
+        // Podrías mostrar un mensaje de éxito si tienes un estado para ello
+        
+    } catch (err: any) {
+        console.error("[AppContainer] Error processing YouTube URL:", err.message);
+        setConfigError(`Error procesando URL: ${err.message}`);
+    } finally {
+        setIsProcessingUrl(false);
+    }
+  }, [user?.id, isLoadingConfig, templateData]);
 
   const resetProcess = useCallback(() => {
     console.log("[AppContainer] Resetting process.");
@@ -447,9 +524,21 @@ export function AppContainer({ user }: AppContainerProps) {
             </AlertDescription>
           </Alert>
         )}
+
+        {/* Mostrar estado de procesamiento de URL */}
+        {isProcessingUrl && (
+          <div className="text-center p-10">
+            <p>Obteniendo información del audio de YouTube...</p>
+            <p className="text-sm text-gray-600 mt-2">La descarga comenzará automáticamente</p>
+          </div>
+        )}
         
-        {!isLoadingConfig && !activeJob && !configError && ( 
-          <AudioUpload onFileUpload={handleFileUpload} disabled={isUploading || !templateData} />
+        {!isLoadingConfig && !activeJob && !configError && !isProcessingUrl && ( 
+          <AudioUpload 
+            onFileUpload={handleFileUpload} 
+            onUrlSubmit={handleUrlSubmit}
+            disabled={isUploading || isProcessingUrl || !templateData} 
+          />
         )}
 
         {activeJob && activeJob.status !== 'complete' && activeJob.status !== 'error' && (

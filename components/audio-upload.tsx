@@ -4,21 +4,21 @@ import { useState, useCallback, useEffect } from "react"
 import { useDropzone } from "react-dropzone"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { Upload, FileAudio, AlertCircle, Clock, Headphones, FileText, Shield } from "lucide-react"
+import { Upload, FileAudio, AlertCircle, Clock, Headphones, FileText, Shield, Link, Play } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { createClient } from "@/lib/supabase/client"
 
-// CAMBIO 1: Añadir 'disabled' a las props que el componente espera recibir.
 interface AudioUploadProps {
   onFileUpload: (file: File) => void
+  onUrlSubmit: (url: string) => void
   disabled: boolean
 }
 
-// CAMBIO 2: Recibir la prop 'disabled'.
-export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
+export function AudioUpload({ onFileUpload, onUrlSubmit, disabled }: AudioUploadProps) {
   const [error, setError] = useState<string | null>(null)
   const [outputFormat, setOutputFormat] = useState<string | null>(null)
   const [loadingFormat, setLoadingFormat] = useState<boolean>(true)
+  const [youtubeUrl, setYoutubeUrl] = useState("")
 
   const onDrop = useCallback(
     (acceptedFiles: File[]) => {
@@ -43,7 +43,23 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
     },
     [onFileUpload, disabled],
   )
-  
+
+  const handleUrlProcessing = useCallback(() => {
+    setError(null)
+    
+    if (!youtubeUrl.trim()) {
+      setError("Por favor ingresa una URL de YouTube")
+      return
+    }
+    
+    const url = youtubeUrl.trim()
+    if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
+      setError("La URL debe ser de YouTube (youtube.com o youtu.be)")
+      return
+    }
+    
+    onUrlSubmit(url)
+  }, [youtubeUrl, onUrlSubmit])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -51,7 +67,6 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
       "audio/*": [".mp3", ".wav", ".m4a", ".ogg"],
     },
     multiple: false,
-    // CAMBIO 3: Pasar la propiedad 'disabled' al hook para deshabilitar la funcionalidad.
     disabled,
   })
 
@@ -93,7 +108,6 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
   ]
 
   return (
-    // CAMBIO 4: Aplicar un estilo de opacidad a todo el componente cuando esté deshabilitado.
     <div className={`space-y-6 transition-opacity duration-300 ${disabled ? 'opacity-50' : ''}`}>
       <div className="text-center">
         <div className="inline-flex items-center space-x-2 bg-slate-100 border border-slate-200 rounded-lg px-4 py-2">
@@ -112,13 +126,12 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
           <span className="block text-slate-700 font-normal">documentos estructurados</span>
         </h1>
         <p className="text-slate-600 max-w-2xl mx-auto font-light">
-          Sube tu grabación y obtén actas profesionales organizadas automáticamente.
+          Sube tu grabación o procesa un video de YouTube para obtener actas profesionales organizadas automáticamente.
         </p>
       </div>
       <Card className="relative overflow-hidden border-slate-200 bg-white">
         <div
           {...getRootProps()}
-          // CAMBIO 5: Cambiar las clases CSS para reflejar el estado deshabilitado (sin hover, cursor de no permitido).
           className={`relative p-6 border-2 border-dashed transition-all duration-300 ${
             disabled
               ? 'border-slate-200 bg-slate-50 cursor-not-allowed'
@@ -154,7 +167,6 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
             <Button
               size="sm"
               className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 text-sm font-medium transition-all duration-300"
-              // CAMBIO 6: Deshabilitar el botón explícitamente.
               disabled={disabled}
             >
               <Upload className="w-4 h-4 mr-2" />
@@ -163,13 +175,62 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
             <p className="text-xs text-slate-400 font-light">Hasta 200MB • Procesamiento confidencial</p>
           </div>
         </div>
+        
+        {/* YouTube URL Section */}
+        <div className="px-6 pb-6">
+          <div className="flex items-center justify-center mb-4">
+            <div className="flex-1 border-t border-slate-200"></div>
+            <span className="px-3 text-sm text-slate-500 font-light">O</span>
+            <div className="flex-1 border-t border-slate-200"></div>
+          </div>
+          
+          <div className="space-y-3">
+            <div className="text-center">
+              <div className="inline-flex items-center space-x-2 mb-2">
+                <div className="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center">
+                  <Play className="w-4 h-4 text-red-600" />
+                </div>
+                <span className="text-sm font-medium text-slate-700">Procesar video de YouTube</span>
+              </div>
+            </div>
+            
+            <div className="flex space-x-2">
+              <div className="flex-1 relative">
+                <input
+                  type="text"
+                  value={youtubeUrl}
+                  onChange={(e) => setYoutubeUrl(e.target.value)}
+                  placeholder="Pega un enlace de YouTube aquí"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-transparent disabled:bg-slate-50 disabled:cursor-not-allowed"
+                  disabled={disabled}
+                />
+                <Link className="absolute right-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
+              </div>
+              <Button
+                onClick={handleUrlProcessing}
+                size="sm"
+                className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 text-sm font-medium transition-all duration-300"
+                disabled={disabled}
+              >
+                <Play className="w-4 h-4 mr-2" />
+                Procesar URL
+              </Button>
+            </div>
+            
+            <p className="text-xs text-slate-400 font-light text-center">
+              Extrae el audio de videos de YouTube para procesamiento
+            </p>
+          </div>
+        </div>
       </Card>
+      
       {error && (
         <Alert variant="destructive" className="border-red-200 bg-red-50">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription className="text-red-800 font-light">{error}</AlertDescription>
         </Alert>
       )}
+      
       <div className="grid md:grid-cols-3 gap-4">
         {features.map((feature, index) => (
           <div key={index} className="text-center space-y-2 p-3">
@@ -181,6 +242,7 @@ export function AudioUpload({ onFileUpload, disabled }: AudioUploadProps) {
           </div>
         ))}
       </div>
+      
       <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
         <div className="flex items-center justify-center space-x-4 text-xs text-slate-700 font-light">
           <div className="flex items-center space-x-1">

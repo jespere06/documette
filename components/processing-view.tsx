@@ -3,20 +3,19 @@
 import { useEffect, useState } from "react"
 import { Progress } from "@/components/ui/progress"
 import { Card } from "@/components/ui/card"
-import { Loader2, Headphones, Users, FileText, Zap, Check } from "lucide-react" // Añadido Check
-import type { JobStatus } from "@/app/page" // O desde donde importes JobStatus
+import { Loader2, Headphones, Users, FileText, Zap, Check, Download } from "lucide-react"
+import type { JobStatus } from "@/app/page"
 
 interface ProcessingViewProps {
   step: JobStatus;
   progress: number
   fileName: string
-  fileSize: number // Asegúrate de pasar un valor real desde AppContainer si quieres que se muestre
+  fileSize: number
 }
 
 export function ProcessingView({ step, progress, fileName, fileSize }: ProcessingViewProps) {
   const [currentTime, setCurrentTime] = useState(0)
-  // Ajuste inicial para el tiempo estimado, podría ser más dinámico
-  const [estimatedTotalTime, setEstimatedTotalTime] = useState(120) // Estimación total en segundos
+  const [estimatedTotalTime, setEstimatedTotalTime] = useState(120)
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -27,17 +26,12 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
 
   const estimatedRemainingTime = () => {
     if (progress === 0 || progress === 100) return 0;
-    // Una forma simple de estimar: si el 35% tomó X, el 100% tomará (X / 0.35)
-    // Y el restante es (Total Estimado - Tiempo Actual)
-    // Esto es muy básico, podrías querer una lógica más sofisticada si el tiempo por paso varía mucho.
-    // O podrías basar estimatedTotalTime en la duración del audio inicialmente.
     const projectedTotal = (currentTime / progress) * 100;
     return Math.max(0, Math.round(projectedTotal - currentTime));
   }
 
-
   const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return "0.0 MB"; // Para evitar NaN si fileSize es 0
+    if (bytes === 0) return "0.0 MB";
     const mb = bytes / (1024 * 1024)
     return `${mb.toFixed(1)} MB`
   }
@@ -48,31 +42,65 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
     return `${mins}:${secs.toString().padStart(2, "0")}`
   }
 
-  // Los IDs deben coincidir con los valores de JobStatus
+  // Agregamos todos los estados posibles incluyendo "fetching"
   const stepsDefinition: Array<{ id: JobStatus, title: string, description: string, icon: React.ElementType }> = [
     {
-      id: "transcribed", // Coincide con JobStatus
+      id: "uploading",
+      title: "Subiendo",
+      description: "Cargando archivo",
+      icon: Download,
+    },
+    {
+      id: "uploaded",
+      title: "Subido",
+      description: "Archivo cargado",
+      icon: Check,
+    },
+    {
+      id: "transcribed",
       title: "Transcripción",
       description: "Convirtiendo audio a texto",
       icon: Headphones,
     },
     {
-      id: "diarized",    // Coincide con JobStatus
+      id: "diarized",
       title: "Identificación",
       description: "Separando hablantes",
       icon: Users,
     },
     {
-      id: "generated",   // Coincide con JobStatus
+      id: "generated",
       title: "Generación",
       description: "Estructurando acta",
       icon: FileText,
     },
+    {
+      id: "fetching",
+      title: "Finalizando",
+      description: "Preparando resultado",
+      icon: Zap,
+    },
   ];
 
-  // Encuentra el índice del estado actual del job en nuestra definición de pasos.
-  // Esto es para marcar los pasos anteriores como completados.
   const currentJobStatusIndex = stepsDefinition.findIndex((s) => s.id === step);
+
+  // Determinar qué pasos mostrar según el estado actual
+  const getVisibleSteps = () => {
+    // Si estamos en estados iniciales (uploading, uploaded), mostrar solo los pasos principales
+    if (step === "uploading" || step === "uploaded") {
+      return stepsDefinition.slice(2, 5); // transcribed, diarized, generated
+    }
+    
+    // Si estamos en fetching, mostrar los pasos principales
+    if (step === "fetching") {
+      return stepsDefinition.slice(2, 5); // transcribed, diarized, generated
+    }
+    
+    // Para los demás estados, mostrar los pasos principales
+    return stepsDefinition.slice(2, 5); // transcribed, diarized, generated
+  };
+
+  const visibleSteps = getVisibleSteps();
 
   return (
     <div className="space-y-4">
@@ -104,14 +132,25 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
           <Progress value={progress} className="h-2 bg-slate-100" />
 
           <div className="grid grid-cols-3 gap-2">
-            {stepsDefinition.map((stepInfo, index) => {
-              // Determinar si este paso es el actual, uno anterior (completado) o uno futuro.
-              // El 'step' (JobStatus) que está "activo" según el backend.
-              const isActiveStep = stepInfo.id === step;
-              
-              // Un paso se considera completado si su índice es menor que el índice del estado actual del job.
-              // Ejemplo: si step='diarized' (índice 1), entonces 'transcribed' (índice 0) está completado.
-              const isCompletedStep = currentJobStatusIndex > - 1 && index < currentJobStatusIndex;
+            {visibleSteps.map((stepInfo, index) => {
+              // Lógica especial para diferentes estados
+              let isActiveStep = false;
+              let isCompletedStep = false;
+
+              if (step === "uploading" || step === "uploaded") {
+                // En estados iniciales, ningún paso principal está activo/completado
+                isActiveStep = false;
+                isCompletedStep = false;
+              } else if (step === "fetching") {
+                // En fetching, todos los pasos principales están completados
+                isCompletedStep = true;
+                isActiveStep = false;
+              } else {
+                // Para transcribed, diarized, generated
+                isActiveStep = stepInfo.id === step;
+                const stepIndex = stepsDefinition.findIndex(s => s.id === stepInfo.id);
+                isCompletedStep = currentJobStatusIndex > -1 && stepIndex < currentJobStatusIndex;
+              }
 
               const Icon = stepInfo.icon;
 
@@ -120,20 +159,20 @@ export function ProcessingView({ step, progress, fileName, fileSize }: Processin
                   key={stepInfo.id}
                   className={`p-2 rounded-lg border text-center transition-all ${
                     isActiveStep
-                      ? "bg-slate-50 border-slate-300" // Estilo para el paso activo
+                      ? "bg-slate-50 border-slate-300"
                       : isCompletedStep
-                        ? "bg-slate-900 border-slate-900 text-white" // Estilo para pasos completados
-                        : "bg-white border-slate-200" // Estilo para pasos futuros/pendientes
+                        ? "bg-slate-900 border-slate-900 text-white"
+                        : "bg-white border-slate-200"
                   }`}
                 >
                   <div className="flex flex-col items-center space-y-1">
                     <div className="w-6 h-6 flex items-center justify-center">
                       {isCompletedStep ? (
-                        <Check className="w-4 h-4 text-white" /> // Icono para completado
+                        <Check className="w-4 h-4 text-white" />
                       ) : isActiveStep ? (
-                        <Loader2 className="w-4 h-4 animate-spin" /> // Icono para activo
+                        <Loader2 className="w-4 h-4 animate-spin" />
                       ) : (
-                        <Icon className="w-4 h-4 text-slate-400" /> // Icono para pendiente
+                        <Icon className="w-4 h-4 text-slate-400" />
                       )}
                     </div>
                     <div className="text-xs font-medium">{stepInfo.title}</div>
