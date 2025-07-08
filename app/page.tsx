@@ -6,9 +6,34 @@ import { redirect } from "next/navigation";
 import { AppContainer } from "@/components/app-container";
 
 // El estado del proceso ahora es el 'status' de la tabla de trabajos
-export type JobStatus = "downloading" | "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "complete" | "error";
+// Definición final del tipo JobStatus (orden lógico por etapa)
+
+export type JobStatus =
+  // 1. Estados iniciales (manejados por el cliente/frontend)
+  | "uploading"      // El cliente está subiendo el archivo de audio.
+  | "uploaded"       // El archivo ya está en GCS, listo para ser procesado.
+
+  // 2. Etapa de Transcripción
+  | "transcribing"   // El servicio 'transcribe' está procesando el audio.
+  | "transcribed"    // El servicio 'transcribe' ha finalizado y guardado la transcripción.
+
+  // 3. Etapa de Identificación y Análisis (Diarización)
+  | "diarizing"      // El servicio 'identify-speakers' está analizando la transcripción.
+  | "diarized"       // El servicio 'identify-speakers' ha finalizado la extracción de datos.
+
+  // 4. Etapa de Generación de Markdown
+  | "generating"     // El servicio 'markdown-generate' está creando el documento.
+  | "generated"      // El servicio 'markdown-generate' ha finalizado y guardado el markdown.
+
+  // 5. Etapa Final de Generación de DOCX
+  | "docxing"        // El servicio 'docx-generate' está creando el archivo .docx.
+  | "complete"       // ¡Éxito! Todo el proceso ha terminado y el .docx está listo.
+
+  // Estado de Fallo General
+  | "error";         // Ocurrió un error en cualquier punto del proceso.
 
 // Este tipo debe coincidir con la estructura de tu tabla 'job_instances'
+// y/o el ENUM type en tu base de datos si estás usando uno.
 export interface JobInstance {
   id: string;
   user_id: string;

@@ -11,11 +11,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Terminal } from "lucide-react"
 import type { User as SupabaseUser, RealtimeChannel } from "@supabase/supabase-js"
-import type { ActaData, Speaker } from "@/app/page" // Asumiendo que Speaker y ActaData se definen en page.tsx
+import type { ActaData, Speaker, JobStatus } from "@/app/page"
 import { v4 as uuidv4 } from 'uuid';
-
-// Estados del trabajo según el roadmap del backend
-type JobStatus = "uploading" | "uploaded" | "transcribed" | "diarized" | "generated" | "complete" | "error";
 
 // Tipo para un registro de trabajo de la tabla job_instances
 export interface Job { 
@@ -51,13 +48,18 @@ const capitalizeTitle = (fileName: string): string => {
     return nameWithoutExtension.charAt(0).toUpperCase() + nameWithoutExtension.slice(1);
 }
 
+// Función actualizada para mapear estados a porcentajes de progreso
 const mapStatusToProgress = (status: JobStatus): number => {
     const progressMap: Record<JobStatus, number> = {
         uploading: 5,
-        uploaded: 15,
+        uploaded: 10,
+        transcribing: 20,
         transcribed: 35,
+        diarizing: 45,
         diarized: 60,
+        generating: 70,
         generated: 80,
+        docxing: 90,
         complete: 100,
         error: 100, 
     };
@@ -70,7 +72,7 @@ export function AppContainer({ user }: AppContainerProps) {
   const [isLoadingConfig, setIsLoadingConfig] = useState(true)
   const [configError, setConfigError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false);
-  const [currentFileSize, setCurrentFileSize] = useState(0); // Para ProcessingView
+  const [currentFileSize, setCurrentFileSize] = useState(0);
   
   const [fullActaData, setFullActaData] = useState<ActaData | null>(null);
   const [isLoadingExtraData, setIsLoadingExtraData] = useState(false);
@@ -482,6 +484,7 @@ export function AppContainer({ user }: AppContainerProps) {
             isLoadingExtraData={isLoadingExtraData} 
           />
         )}
+        
         {activeJob && activeJob.status === 'complete' && !fullActaData && (isLoadingExtraData || !fullActaData) && (
              <div className="text-center p-10"><p>Cargando datos finales del acta...</p></div>
         )}
